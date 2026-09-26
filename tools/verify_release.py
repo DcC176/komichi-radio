@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""对「发布」目录做端到端自检。
+"""对单文件 EXE 做端到端自检。
 
-模拟双击 EXE，验证五件事：
-    1. 服务能起来、首页能打开
-    2. 每次打开都重新抓取回放清单（而不是命中缓存）
-    3. 清单里的最新一集是新鲜的（不是内置快照里的旧数据）
+模拟用户真实拿到的东西：只有一个 EXE，扔进任意一个空文件夹。
+验证五件事：
+    1. EXE 能起来，网页文件被释放到 %LOCALAPPDATA%\\KomichiRadio\\www\\
+    2. 首页能打开，且每次打开都重新抓回放清单（不是命中缓存）
+    3. 清单里的最新一集是新鲜的
     4. 重复双击不会起第二个实例，而是复用已在跑的那个
-    5. --stop（「停止.bat」）能真正把服务停掉
+    5. --stop 能停掉服务（网页上「停止本地服务」走的是同一条路径）
 
 用法：
     python tools/build_exe.py       # 先打包
@@ -17,6 +18,8 @@
 """
 import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -24,8 +27,15 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROOT, "发布", "二十四时小路电台.exe")
+APPDIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+                      "KomichiRadio")
+WWW = os.path.join(APPDIR, "www")
+# 沙箱里只放 EXE，不放任何网页文件 —— 这样走的才是「单文件分发」那条分支
+SANDBOX = os.path.join(ROOT, "build", "verify-single")
 PORT = 8765
 BASE = "http://127.0.0.1:%d/" % PORT
+
+WEB_ITEMS = ("index.html", "favicon.ico", "assets", "data")
 
 
 def get(path, timeout=120):
@@ -33,16 +43,92 @@ def get(path, timeout=120):
         return r.status, r.read()
 
 
+def clear_stale():
+    """启动前把可能残留的旧实例停掉。
+
+    否则 wait_ready 会连上旧实例立刻返回，此时新 EXE 还在解压释放，
+    后面的释放检查必然落空（实测踩过这个竞态）。
+    """
+    try:
+        urllib.request.urlopen(BASE + "api/quit", timeout=5).read()
+        time.sleep(2)
+    except Exception:
+        pass
+
+
 def wait_ready(deadline=60):
     """等 EXE 把端口监听起来。onefile 首次运行要先解压，会慢一点。"""
     end = time.time() + deadline
     while time.time() < end:
         try:
-            urllib.request.urlopen(BASE, timeout=3).read()
-            return True
+            with urllib.request.urlopen(BASE + "api/ping", timeout=3) as r:
+                if json.loads(r.read().decode("utf-8")).get("app") == "komichi-radio":
+                    return True
         except Exception:
-            time.sleep(0.5)
+            pass
+        time.sleep(0.5)
     return False
+
+
+def force_unpack():
+    """把释放目录的版本标记改掉，强制走一遍重新释放。
+
+    否则上一次跑过之后版本一致，释放会被判重跳过，等于没验证到这条路径。
+    """
+    ver = os.path.join(WWW, "www_version.txt")
+    if not os.path.exists(ver):
+        return
+    try:
+        with open(ver, "w", encoding="utf-8") as f:
+            f.write("stale")
+        print("OK   版本标记已置为 stale，将强制重新释放")
+    except OSError as e:
+        print("WARN 改版本标记失败：%s" % e)
+
+
+def port_free():
+    """8765 必须空闲。
+
+    否则我们启动的那个会顺延到 8766，而脚本还在测 8765 —— 测到的是别人，
+    后面的「服务已就绪」会立刻成立（其实新实例还在解压释放），结论全不可信。
+    """
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", PORT))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def prepare_sandbox():
+    """把 EXE 单独放到一个空目录里，模拟用户下载后只有一个文件。
+
+    刻意不做任何删除：本机删除会走回收站且 fail-closed，删不掉就白搭。
+    目录只用来放 EXE，只要里面没混进网页文件，就不会误走外置模式。
+    """
+    os.makedirs(SANDBOX, exist_ok=True)
+    for name in WEB_ITEMS:
+        if os.path.exists(os.path.join(SANDBOX, name)):
+            print("沙箱里混进了 %s，请先手动清空 %s" % (name, SANDBOX))
+            return None
+    dst = os.path.join(SANDBOX, os.path.basename(EXE))
+    shutil.copy2(EXE, dst)
+    return dst
+
+
+def check_unpacked():
+    """确认网页文件确实释放到了用户目录"""
+    missing = [n for n in WEB_ITEMS if not os.path.exists(os.path.join(WWW, n))]
+    if missing:
+        print("FAIL 释放目录缺少：%s（%s）" % ("、".join(missing), WWW))
+        return False
+    n = sum(len(f) for _, _, f in os.walk(WWW))
+    print("OK   网页文件已释放到 %s（%d 个文件）" % (WWW, n))
+    rm = os.path.join(APPDIR, "使用说明.txt")
+    print("OK   使用说明：%s" % ("已释放" if os.path.exists(rm) else "缺失"))
+    return True
 
 
 def main():
@@ -50,14 +136,30 @@ def main():
         print("找不到 %s\n请先运行：python tools/build_exe.py" % EXE)
         return 1
 
+    if not port_free():
+        print("FAIL 端口 %d 已被占用。请先停掉正在运行的实例（EXE --stop）再重跑，"
+              "否则测到的是别人那个实例。" % PORT)
+        return 1
+
+    sandbox_exe = prepare_sandbox()
+    if sandbox_exe is None:
+        return 1
+    print("沙箱：%s" % sandbox_exe)
+
+    clear_stale()
+    force_unpack()
+
     # --no-browser：自检不该把浏览器窗口弹到用户脸上
-    proc = subprocess.Popen([EXE, "--no-browser"])
+    proc = subprocess.Popen([sandbox_exe, "--no-browser"])
     try:
         if not wait_ready():
             print("FAIL 服务 60 秒内没起来，看日志："
                   r"%LOCALAPPDATA%\KomichiRadio\log.txt")
             return 1
         print("OK   服务已就绪  %s" % BASE)
+
+        if not check_unpacked():
+            return 1
 
         st, body = get("")
         print("OK   首页 HTTP %d（%d 字节）" % (st, len(body)))
@@ -80,7 +182,7 @@ def main():
               % ((time.time() - newest) / 86400.0, d["programs"][0]["title"]))
 
         # 再双击一次：不该起第二个实例，而应复用已在跑的那个后立刻退出
-        again = subprocess.Popen([EXE, "--no-browser"])
+        again = subprocess.Popen([sandbox_exe, "--no-browser"])
         try:
             rc = again.wait(timeout=30)
             print("OK   重复双击：立即退出（退出码 %d），复用已有实例" % rc)
@@ -97,8 +199,8 @@ def main():
         print("\n前 4 项通过。")
         return 0
     finally:
-        # 用「停止.bat」走的同一条路径收尾，顺带验证第 5 项
-        stopper = subprocess.Popen([EXE, "--stop"])
+        # 走网页「停止本地服务」的同一条路径收尾，顺带验证第 5 项
+        stopper = subprocess.Popen([sandbox_exe, "--stop"])
         time.sleep(5)
         try:
             urllib.request.urlopen(BASE, timeout=3).read()

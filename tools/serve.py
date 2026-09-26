@@ -27,6 +27,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -37,16 +38,68 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 FROZEN = bool(getattr(sys, "frozen", False))    # True = 由 PyInstaller 打成的 EXE
 
+WEB_ITEMS = ("index.html", "favicon.ico", "assets", "data")   # 打进 EXE 的网页文件
+
+
+def unpack_web(appdir):
+    """把 EXE 内置的网页文件释放到 appdir\\www，返回该目录；失败返回 None。
+
+    只在「EXE 同目录没有 index.html」时调用 —— 也就是用户只拿到一个 EXE 的场景。
+    靠 www_version.txt 判重：版本没变就不重复覆盖，省掉每次启动的拷贝开销。
+    """
+    src = getattr(sys, "_MEIPASS", None)
+    if not src:
+        return None
+    dst = os.path.join(appdir, "www")
+    try:
+        with open(os.path.join(src, "www_version.txt"), encoding="utf-8") as f:
+            want = f.read().strip()
+        try:
+            with open(os.path.join(dst, "www_version.txt"), encoding="utf-8") as f:
+                have = f.read().strip()
+        except OSError:
+            have = ""
+        # 使用说明始终释放到用户目录根（和凭据、日志同级），保证随时找得到
+        rm = os.path.join(src, "readme.txt")
+        if os.path.exists(rm):
+            shutil.copy2(rm, os.path.join(appdir, "使用说明.txt"))
+        if want and want == have and os.path.exists(os.path.join(dst, "index.html")):
+            return dst
+        os.makedirs(dst, exist_ok=True)
+        for name in WEB_ITEMS:
+            s = os.path.join(src, name)
+            d = os.path.join(dst, name)
+            if os.path.isdir(s):
+                shutil.copytree(s, d, dirs_exist_ok=True)   # 覆盖式，不先删目录
+            elif os.path.exists(s):
+                shutil.copy2(s, d)
+        with open(os.path.join(dst, "www_version.txt"), "w", encoding="utf-8") as f:
+            f.write(want)
+        return dst
+    except OSError as e:
+        # 这里静默失败会让「服务照样能用、但文件没落盘」变得无从排查，写进日志留痕。
+        try:
+            with open(os.path.join(appdir, "log.txt"), "a", encoding="utf-8") as f:
+                f.write("释放网页文件失败：%s\n" % e)
+        except OSError:
+            pass
+        return None
+
+
 if FROZEN:
-    # 打包后网页文件（index.html / assets / data）与 EXE 同目录：改前端不用重新打包。
-    ROOT = os.path.dirname(os.path.abspath(sys.executable))
     # 凭据和日志写用户目录，EXE 放在只读位置（Program Files、只读盘）也能跑。
     APPDIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
                           "KomichiRadio")
     try:
         os.makedirs(APPDIR, exist_ok=True)
     except OSError:
-        APPDIR = ROOT
+        APPDIR = os.path.dirname(os.path.abspath(sys.executable))
+    # 网页文件有两种来源，优先外置：
+    #   1) EXE 同目录有 index.html —— 外置模式，改前端不用重新打包（开发/定制用）
+    #   2) 没有 —— 从 EXE 内置资源释放到 APPDIR\www，分发时只需要给一个 EXE
+    ROOT = os.path.dirname(os.path.abspath(sys.executable))
+    if not os.path.exists(os.path.join(ROOT, "index.html")):
+        ROOT = unpack_web(APPDIR) or os.path.join(getattr(sys, "_MEIPASS", ROOT))
 else:
     ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     APPDIR = os.path.join(ROOT, "tools")
@@ -921,8 +974,10 @@ def main():
         return 0
 
     if not os.path.exists(os.path.join(ROOT, "index.html")):
-        notify("缺少网页文件 index.html。\n\n"
-               "请把 EXE 与 index.html、assets、data 放在同一个文件夹里再运行。",
+        # 正常情况下走不到这里：单文件模式已从内置资源释放。
+        # 能走到说明 %LOCALAPPDATA% 不可写、EXE 同目录也没有网页文件。
+        notify("网页文件缺失，且无法从 EXE 内置资源释放。\n\n"
+               "请确认 %s 可写，或重新获取完整的 EXE。" % APPDIR,
                error=True)
         return 1
 
@@ -949,7 +1004,7 @@ def main():
     print("  凭据：%s" % (SESS_FILE if s else
                         "未登录（最高 480P）。如需 1080P，点播放器右上角「登录」扫码"))
     print("  地址：%s" % url)
-    print("  停止：Ctrl+C，或运行「停止.bat」")
+    print("  停止：网页右下角「停止本地服务」，或本程序加 --stop 参数")
 
     if not args.no_browser:
         # 端口已经绑定，此刻打开不会连接失败

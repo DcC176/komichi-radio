@@ -272,6 +272,7 @@
       <a href="https://space.bilibili.com/1512246445" target="_blank" rel="noopener">四时小路Komichi</a>
       所有，视频流由本站播放器经 B 站接口代理播放（页内不含弹幕轨道）。<br>
       数据来源：<a href="https://space.bilibili.com/1512246445/lists/5157110?type=series" target="_blank" rel="noopener">直播回放系列</a>
+      <br><button id="btn-quit" type="button" style="margin-top:10px;background:none;border:0;padding:0;color:inherit;opacity:.5;font:inherit;text-decoration:underline;cursor:pointer">停止本地服务</button>
     </div>
   </aside>
 
@@ -320,5 +321,18 @@
 <script src="assets/qrcode.min.js"></script>
 <script src="assets/dash.all.min.js"></script>
 <script src="assets/app.js"></script>
+<script>
+// 单文件分发后没有「停止.bat」了，停止入口放在页面上。
+// 服务只绑 127.0.0.1，这个请求只会打到本机服务。
+document.getElementById("btn-quit").addEventListener("click", function () {
+  if (!window.confirm("停止本机服务？\n\n停止后本页将无法继续播放，需要重新双击 EXE 才能再用。")) return;
+  var done = function () {
+    document.body.innerHTML =
+      '<div style="padding:80px 24px;text-align:center;font:16px/2 system-ui,sans-serif">' +
+      '服务已停止，可以关闭此页面了。</div>';
+  };
+  fetch("api/quit").then(done, done);   // 服务一关 fetch 本身就会断，成功失败都当已停止
+});
+</script>
 </body>
 </html>
