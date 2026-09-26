@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>官方播放器验证面板 v2 · 二十四时小路电台</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--line:#e2e2de;--ink:#22221f;--muted:#6b6b66;
+--ok:#2f7d4f;--bad:#b3382f;--warn:#8a6d1f;--accent:#2a5b9b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.wrap{max-width:1000px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:18px;font-weight:600;margin:0 0 4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-bottom:14px}
+.env{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:5px 18px;font-size:13px}
+.env b{font-weight:600;color:var(--muted);margin-right:6px}
+.env .warnline{grid-column:1/-1;color:var(--warn);margin-top:4px}
+.plrow{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.pl{border:1px solid var(--line);background:var(--card);border-radius:8px;padding:9px 14px;
+font-size:13px;cursor:pointer;color:var(--ink);text-align:left}
+.pl:hover{border-color:#c9c9c3}
+.pl.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.pl small{display:block;font-size:11px;opacity:.75;margin-top:2px}
+.tabs{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+.tab{border:1px solid var(--line);background:var(--card);border-radius:8px;
+padding:7px 12px;font-size:13px;cursor:pointer;color:var(--ink)}
+.tab:hover{border-color:#c9c9c3}
+.tab.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.tab .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#cfcfc9;
+margin-right:6px;vertical-align:middle}
+.tab .dot.pass{background:var(--ok)}.tab .dot.fail{background:var(--bad)}.tab .dot.unsure{background:var(--warn)}
+.stage{background:#111;border-radius:8px;overflow:hidden;aspect-ratio:16/9;position:relative;margin-top:12px}
+.stage iframe{width:100%;height:100%;border:0;display:block}
+.loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+color:#9a9a95;font-size:13px}
+.q{font-weight:600;margin:0 0 4px}
+.hint{color:var(--muted);font-size:13px}
+.url{font:12px/1.5 ui-monospace,Consolas,monospace;color:#55554f;word-break:break-all;
+background:#f2f2ee;border-radius:6px;padding:7px 9px;margin-top:10px}
+.btns{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+button{border:1px solid var(--line);background:var(--card);border-radius:8px;
+padding:8px 14px;font-size:13px;cursor:pointer;color:var(--ink)}
+button:hover{border-color:#c9c9c3}
+button.pass.on{background:var(--ok);border-color:var(--ok);color:#fff}
+button.fail.on{background:var(--bad);border-color:var(--bad);color:#fff}
+button.unsure.on{background:var(--warn);border-color:var(--warn);color:#fff}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+pre{background:#f2f2ee;border-radius:8px;padding:12px;font-size:12px;overflow:auto;
+white-space:pre-wrap;word-break:break-all;margin:10px 0 0}
+.note{font-size:13px;color:var(--muted);margin-top:10px}
+.count{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:600}
+.callout{background:#fdf6e8;border:1px solid #e8d9b5;border-radius:8px;
+padding:10px 12px;font-size:13px;margin-top:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>官方播放器验证面板 v2</h1>
+  <div class="sub">二十四时小路电台 · 双播放器对照（独立原型，不触碰 cloud/）</div>
+
+  <div class="card"><div class="env" id="env"></div></div>
+
+  <div class="card">
+    <div class="q">播放器</div>
+    <div class="hint">两个播放器的参数名不同，结果需分别记录。请都测一遍再对比。</div>
+    <div class="plrow" id="players" style="margin-top:10px"></div>
+    <div class="note" id="plNote"></div>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+
+  <div class="card">
+    <div class="q" id="qTitle"></div>
+    <div class="hint" id="qHint"></div>
+    <div class="stage" id="stage"></div>
+    <div class="url" id="url"></div>
+    <div class="btns">
+      <button class="pass" data-v="pass">通过</button>
+      <button class="fail" data-v="fail">失败</button>
+      <button class="unsure" data-v="unsure">不确定</button>
+      <button data-v="reset">清除本项</button>
+      <button class="primary" id="reload">重新加载</button>
+    </div>
+    <div class="note" id="extra"></div>
+  </div>
+
+  <div class="card">
+    <div class="q">「登录态画质」排查方法</div>
+    <div class="hint">浏览器默认阻止第三方 Cookie，iframe 里的 B 站读不到你的登录态，
+    因此最高只给 480P。想确认是不是这个原因，可以临时放行后再测一次：</div>
+    <ol class="hint" style="margin:8px 0 0;padding-left:20px">
+      <li>地址栏打开 <code>chrome://settings/cookies</code>（Edge 为 <code>edge://settings/content/cookies</code>）</li>
+      <li>选择「允许第三方 Cookie」，或把 <code>[*.]bilibili.com</code> 加入允许列表</li>
+      <li>回到本页重新加载，再测一次用例 6</li>
+      <li>测完请改回原设置——放行第三方 Cookie 会降低日常浏览的隐私防护</li>
+    </ol>
+    <div class="note">放行后若能选到 1080P，说明方案可行但需用户改设置；若仍是 480P，说明登录态在嵌入场景下不可用。</div>
+  </div>
+
+  <div class="card">
+    <div class="q">结果汇总</div>
+    <div class="hint" id="progress"></div>
+    <pre id="summary"></pre>
+    <div class="btns">
+      <button class="primary" id="copy">复制结果</button>
+      <button id="clear">全部清除</button>
+    </div>
+    <div class="note">把复制到的文本发我。重点是「画面遮挡」与「登录态画质」两项。</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var SING = { bvid: 'BV1jshn6vEik', p: 1, cid: 42117366217, dur: 7234 };
+  var MULTI = { bvid: 'BV1rZaK6zEQP', p: 2, cid: 42173205511, dur: 5871 };
+
+  var PLAYERS = [
+    {
+      id: 'pc', name: 'PC 外链播放器', host: 'player.bilibili.com',
+      base: 'https://player.bilibili.com/player.html', qparam: 'high_quality',
+      note: 'B 站分享按钮给出的默认嵌入地址。2026-07 起有报告称在第三方站点内嵌时画面会被推广面板盖住。'
+    },
+    {
+      id: 'h5', name: 'H5 移动端播放器', host: 'www.bilibili.com',
+      base: 'https://www.bilibili.com/blackboard/html5mobileplayer.html', qparam: 'highQuality',
+      extra: { hideCoverInfo: 1, fjw: 0 },
+      note: 'B 站移动端页面使用的播放器。据踩坑记录，它在第三方站点能正常出画面且界面更干净；注意高清参数是驼峰 highQuality。'
+    }
+  ];
+
+  var CASES = [
+    {
+      id: 'overlay', name: '画面遮挡',
+      params: { bvid: SING.bvid, p: 1, autoplay: 1, muted: 1, danmaku: 1 },
+      q: '播放区域里能看到画面吗？还是被「你感兴趣的视频都在B站」之类的推广面板整块盖住？',
+      h: '预期：能看到画面。这是 2026-07 起出现的新限制，也是本方案能否成立的第一道关。'
+    },
+    {
+      id: 'muted', name: '静音起播',
+      params: { bvid: SING.bvid, p: 1, autoplay: 1, muted: 1, danmaku: 1 },
+      q: 'iframe 出现后，画面是否在没有任何点击的情况下自动开始播放？',
+      h: '预期：自动播放（画面在动、进度条在走）。若停在播放按钮、需要手动点，判失败。'
+    },
+    {
+      id: 'nomuted', name: '非静音（对照）',
+      params: { bvid: SING.bvid, p: 1, autoplay: 1, danmaku: 1 },
+      q: '不传 muted 时，是否被浏览器拦在播放按钮上（没有自动播放）？',
+      h: '这一项是参照组：预期「被拦截」。若它也能自动播放，说明 muted 并非必需——请按你实际看到的现象作答。'
+    },
+    {
+      id: 'seek', name: 't= 定位',
+      params: { bvid: SING.bvid, p: 1, autoplay: 1, muted: 1, t: 300 },
+      q: '播放器是否从 5:00 附近开始，而不是 0:00？',
+      h: '预期：进度落在 5:00 附近（±10 秒内算通过）。加载缓冲需要几秒，请稍等再看。'
+    },
+    {
+      id: 'part', name: '分P 切换',
+      params: { bvid: MULTI.bvid, p: 2, autoplay: 1, muted: 1, t: 60 },
+      q: '是否播放第 2 个分P，且从 1:00 开始？',
+      h: '预期：总时长约 1:37:51（5871 秒），而不是第 1 个分P 的 2:00:36（7236 秒）。'
+    },
+    {
+      id: 'quality', name: '登录态画质',
+      params: { bvid: SING.bvid, p: 1, autoplay: 1, muted: 1 },
+      q: '（需先在浏览器登录 B 站）点开清晰度菜单，最高能选到哪一档？',
+      h: '预期：若登录态在 iframe 内生效 → 有 1080P；若浏览器隔离了第三方 Cookie → 最高只有 480P。这一项决定画质能否超过现有云端版。',
+      extra: '<div class="note" style="margin-top:2px">实际看到的最高清晰度（点选记录，会写进汇总）：</div>'
+        + '<div class="btns" id="qBtns"></div>'
+    },
+    {
+      id: 'danmaku', name: '弹幕开关',
+      params: { bvid: SING.bvid, p: 1, autoplay: 1, muted: 1, danmaku: 0 },
+      q: '画面里是否没有弹幕飘过？',
+      h: '预期：无弹幕。用于确认 danmaku=0 能关闭弹幕。'
+    },
+    {
+      id: 'reload', name: '到点重载',
+      params: { bvid: SING.bvid, p: 1, autoplay: 1, muted: 1, t: 600 },
+      q: '点下方按钮后，播放器会在倒计时结束时重载到 10:00。画面是否跳到新位置？',
+      h: '预期：倒计时结束后 iframe 重新加载，并从 10:00 开始。这是「24 小时连播」的实现方式。',
+      extra: '<button class="primary" id="cycleBtn">开始重载测试（15 秒后跳到 t=600）</button> <span id="cycleMsg"></span>'
+    }
+  ];
+
+  var KEY = 'komichi-proto-official-v3';
+  var state = { idx: 0, pl: 0, results: {}, quality: {} };
+  try {
+    var saved = JSON.parse(localStorage.getItem(KEY) || '{}');
+    if (saved && typeof saved === 'object') {
+      state.results = saved.results || {};
+      state.quality = saved.quality || {};
+    }
+  } catch (e) { state.results = {}; state.quality = {}; }
+
+  function $(id) { return document.getElementById(id); }
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify({ results: state.results, quality: state.quality })); } catch (e) {}
+  }
+  function isMobile() { return /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(navigator.userAgent); }
+  function rk(c) { return PLAYERS[state.pl].id + '|' + c.id; }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function playerUrl(c) {
+    var pl = PLAYERS[state.pl], p = c.params, q = [];
+    q.push('bvid=' + encodeURIComponent(p.bvid));
+    if (p.p) { q.push('p=' + p.p); q.push('page=' + p.p); }
+    q.push('autoplay=' + (p.autoplay ? 1 : 0));
+    if (p.muted) q.push('muted=1');
+    if (p.t) q.push('t=' + p.t);
+    if (p.danmaku !== undefined) q.push('danmaku=' + (p.danmaku ? 1 : 0));
+    q.push(pl.qparam + '=1');
+    if (pl.extra) { for (var k in pl.extra) { if (pl.extra.hasOwnProperty(k)) q.push(k + '=' + pl.extra[k]); } }
+    q.push('_=' + Date.now());
+    return pl.base + '?' + q.join('&');
+  }
+
+  function renderEnv() {
+    var mobile = isMobile();
+    var rows = [
+      ['运行环境', mobile ? '移动端（浏览器可能自动重定向到移动版播放器）' : '桌面端'],
+      ['浏览器 UA', navigator.userAgent],
+      ['视口 / 像素比', window.innerWidth + '×' + window.innerHeight + ' @' + (window.devicePixelRatio || 1) + 'x'],
+      ['当前时间', new Date().toLocaleString('zh-CN')]
+    ];
+    var html = rows.map(function (r) {
+      return '<div><b>' + r[0] + '</b>' + escapeHtml(r[1]) + '</div>';
+    }).join('');
+    if (mobile) {
+      html += '<div class="warnline">移动端提示：「t= 定位」与「静音起播」两项最关键——'
+        + '官方播放器会重定向到移动版页面，需确认参数在新页面里依然生效。</div>';
+    }
+    $('env').innerHTML = html;
+  }
+
+  function renderPlayers() {
+    $('players').innerHTML = PLAYERS.map(function (p, i) {
+      var n = CASES.filter(function (c) { return state.results[p.id + '|' + c.id]; }).length;
+      return '<button class="pl' + (i === state.pl ? ' on' : '') + '" data-p="' + i + '">'
+        + escapeHtml(p.name) + '<small>' + escapeHtml(p.host) + ' · 已测 ' + n + '/' + CASES.length + '</small></button>';
+    }).join('');
+    Array.prototype.forEach.call($('players').querySelectorAll('.pl'), function (b) {
+      b.addEventListener('click', function () {
+        state.pl = parseInt(b.getAttribute('data-p'), 10);
+        render();
+      });
+    });
+    $('plNote').textContent = PLAYERS[state.pl].note;
+  }
+
+  function renderTabs() {
+    $('tabs').innerHTML = CASES.map(function (c, i) {
+      var r = state.results[rk(c)];
+      return '<button class="tab' + (i === state.idx ? ' on' : '') + '" data-i="' + i + '">'
+        + '<span class="dot' + (r ? ' ' + r : '') + '"></span>' + (i + 1) + '. ' + escapeHtml(c.name) + '</button>';
+    }).join('');
+    Array.prototype.forEach.call($('tabs').querySelectorAll('.tab'), function (b) {
+      b.addEventListener('click', function () {
+        state.idx = parseInt(b.getAttribute('data-i'), 10);
+        render();
+      });
+    });
+  }
+
+  function mountIframe(url) {
+    var stage = $('stage');
+    stage.innerHTML = '<div class="loading">正在加载播放器…</div>'
+      + '<iframe id="fr" src="' + url + '" allow="autoplay; fullscreen; encrypted-media"'
+      + ' allowfullscreen scrolling="no" frameborder="0"></iframe>';
+    var fr = $('fr');
+    var timer = setTimeout(function () {
+      var l = stage.querySelector('.loading');
+      if (l) l.textContent = '播放器仍在加载…（首次加载通常需要数秒）';
+    }, 6000);
+    fr.addEventListener('load', function () {
+      clearTimeout(timer);
+      var l = stage.querySelector('.loading');
+      if (l) l.remove();
+    });
+  }
+
+  function renderStage(c) {
+    var url = playerUrl(c);
+    $('url').textContent = url;
+    mountIframe(url);
+  }
+
+  function renderButtons(c) {
+    var cur = state.results[rk(c)];
+    Array.prototype.forEach.call(document.querySelectorAll('button[data-v]'), function (b) {
+      b.classList.toggle('on', b.getAttribute('data-v') === cur);
+    });
+  }
+
+  var QLEVELS = ['360P', '480P', '720P', '1080P', '1080P+', '更高'];
+
+  function renderExtra(c) {
+    $('extra').innerHTML = c.extra || '';
+    if (!c.extra) return;
+
+    var qb = $('qBtns');
+    if (qb) {
+      var pid = PLAYERS[state.pl].id;
+      qb.innerHTML = QLEVELS.map(function (x) {
+        return '<button data-q="' + x + '"'
+          + (state.quality[pid] === x ? ' class="on"' : '') + '>' + x + '</button>';
+      }).join('');
+      Array.prototype.forEach.call(qb.querySelectorAll('button[data-q]'), function (b) {
+        b.addEventListener('click', function () {
+          state.quality[PLAYERS[state.pl].id] = b.getAttribute('data-q');
+          save();
+          renderExtra(c);
+          renderSummary();
+        });
+      });
+    }
+
+    var btn = $('cycleBtn');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var left = 15, msg = $('cycleMsg');
+      btn.disabled = true;
+      function tick() {
+        if (left <= 0) {
+          clearInterval(iv);
+          msg.textContent = '已重载。请观察画面是否跳到 10:00。';
+          btn.disabled = false;
+          var u = playerUrl(c);
+          $('url').textContent = u;
+          mountIframe(u);
+          return;
+        }
+        msg.innerHTML = '倒计时 <span class="count">' + left + '</span> 秒后重载到 t=600…';
+        left -= 1;
+      }
+      tick();
+      var iv = setInterval(tick, 1000);
+    });
+  }
+
+  function render() {
+    var c = CASES[state.idx];
+    $('qTitle').textContent = (state.idx + 1) + '. ' + c.name;
+    $('qHint').textContent = c.q + '　' + c.h;
+    renderStage(c);
+    renderButtons(c);
+    renderExtra(c);
+    renderPlayers();
+    renderTabs();
+    renderSummary();
+  }
+
+  var LABEL = { pass: '通过', fail: '失败', unsure: '不确定' };
+
+  function renderSummary() {
+    var lines = ['官方播放器验证结果（v2 双播放器对照）',
+      '时间：' + new Date().toLocaleString('zh-CN'),
+      '环境：' + (isMobile() ? '移动端' : '桌面端')];
+    PLAYERS.forEach(function (p) {
+      var done = 0;
+      lines.push('', '【' + p.name + '】' + p.host);
+      CASES.forEach(function (c, i) {
+        var r = state.results[p.id + '|' + c.id];
+        if (r) done += 1;
+        lines.push('  ' + (i + 1) + '. ' + c.name + ' → ' + (r ? LABEL[r] : '未测'));
+      });
+      lines.push('  完成 ' + done + ' / ' + CASES.length + ' 项');
+      if (state.quality[p.id]) lines.push('  实测最高清晰度：' + state.quality[p.id]);
+    });
+    $('summary').textContent = lines.join('\n');
+    var n = CASES.filter(function (c) { return state.results[rk(c)]; }).length;
+    $('progress').innerHTML = '当前播放器已完成 <span class="count">' + n + '</span> / '
+      + CASES.length + ' 项（共 2 个播放器）';
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('button[data-v]'), function (b) {
+    b.addEventListener('click', function () {
+      var v = b.getAttribute('data-v'), c = CASES[state.idx], k = rk(c);
+      if (v === 'reset') delete state.results[k]; else state.results[k] = v;
+      save();
+      renderButtons(c);
+      renderTabs();
+      renderPlayers();
+      renderSummary();
+    });
+  });
+
+  $('reload').addEventListener('click', function () { renderStage(CASES[state.idx]); });
+
+  $('copy').addEventListener('click', function () {
+    var text = $('summary').textContent, btn = $('copy');
+    function done() { btn.textContent = '已复制'; setTimeout(function () { btn.textContent = '复制结果'; }, 1500); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { fallback(text, done); });
+    } else { fallback(text, done); }
+  });
+
+  function fallback(text, done) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch (e) { alert('复制失败，请手动选择下方文本'); }
+    document.body.removeChild(ta);
+  }
+
+  $('clear').addEventListener('click', function () {
+    if (!confirm('清除全部验证结果？')) return;
+    state.results = {};
+    save();
+    render();
+  });
+
+  renderEnv();
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+# 二十四时小路电台 · 云端服务（Docker Compose）
+#
+# 用法（在项目根 小路回放台/ 下执行）：
+#     docker compose -f deploy/docker-compose.yml up -d --build
+#     docker compose -f deploy/docker-compose.yml logs -f
+#
+# 若把 cloud/ 与 deploy/ 上传到服务器（例如 /opt/komichi-radio/），
+# 在服务器上直接：
+#     cd /opt/komichi-radio && docker compose -f deploy/docker-compose.yml up -d --build
+
+services:
+  komichi-radio:
+    build:
+      # context 指向项目根，Dockerfile 里的 COPY 用的是 cloud/ 相对路径
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: komichi-radio:latest
+    container_name: komichi-radio
+
+    # 服务器重启、进程崩溃后自动拉起 —— 24 小时频道的基本要求
+    restart: unless-stopped
+
+    ports:
+      # 左侧是宿主机端口。若前面加了 nginx 反代，建议改成 "127.0.0.1:8080:8080"，
+      # 让服务只监听回环，不直接暴露到公网。
+      - "8080:8080"
+
+    environment:
+      PORT: "8080"
+      BIND: "0.0.0.0"
+
+      # CORS 白名单。前端全部走相对路径（/api/...），正常不会触发跨域，
+      # 这是纵深防御。绑定域名后建议填上，例如 "radio.example.com"。
+      # 留空 = 只允许同源。
+      ALLOWED_HOSTS: ""
+
+      # 走 HTTPS 反代时留空即可：app.py 会自动用协议相对 URL（//host）
+      # 并从 X-Forwarded-Host 取域名，避免混合内容拦截。
+      # 仅在反代改写了路径前缀时才需要显式指定，例如 "https://example.com/radio"。
+      PUBLIC_BASE: ""
+
+    # 日志轮转：默认 json-file 驱动不限制大小，长期运行会吃满磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

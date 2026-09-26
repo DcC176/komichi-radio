@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>二十四时小路电台 · 四时小路 24 小时直播回放</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="glow"></div>
+
+<header class="topbar">
+  <div class="tb-left">
+    <span class="tb-brand">四时小路Komichi</span>
+    <span class="tb-sep">/</span>
+    <span class="tb-cur">二十四时小路电台</span>
+  </div>
+  <nav class="tb-tabs">
+    <a class="tab" data-view="live" href="#/live">24 小时频道</a>
+    <a class="tab" data-view="schedule" href="#/schedule">节目单</a>
+    <a class="tab" data-view="categories" href="#/categories">分类</a>
+    <a class="tab" data-view="about" href="#/about">关于</a>
+  </nav>
+  <div class="tb-right">
+    <a class="ghost-btn" href="https://space.bilibili.com/1512246445" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v12H4z"/><path d="M8 3l4 3 4-3"/></svg>
+      小路B站空间
+    </a>
+    <label class="ghost-btn lang-wrap">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>
+      <select id="lang" title="界面语言">
+        <option value="zh-Hans">简体中文</option>
+        <option value="zh-Hant">繁體中文</option>
+      </select>
+    </label>
+  </div>
+</header>
+
+<main class="wrap">
+  <aside class="strip strip-left" id="strip-left">
+    <div class="strip-h">本场分段<span id="strip-left-sub"></span></div>
+    <div class="strip-body" id="strip-left-body"></div>
+  </aside>
+
+  <div class="views">
+
+    <section class="view active" id="view-live">
+      <div class="eyebrow">—— 24 小时频道</div>
+      <h1 class="title">二十四时小路电台</h1>
+      <p class="sub">这里收录了小路全部的直播回放。随时打开都在直播中，自动排期、自动去重，不重复。</p>
+
+      <div class="actions">
+        <button class="btn primary" data-action="unmute">进入直播</button>
+        <button class="btn ghost" id="btn-random">随机一场</button>
+        <button class="btn ghost" data-action="resync">回到直播</button>
+      </div>
+
+      <div class="filters">
+        <div class="chips" id="chips"></div>
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="q" placeholder="搜索标题 / 日期">
+        </label>
+      </div>
+
+      <div class="list-head">
+        <div>
+          <span class="stat" id="stat">—</span>
+          <span class="sorts">
+            <button class="sort active" data-sort="date">最新</button>
+            <button class="sort" data-sort="score">高能</button>
+          </span>
+        </div>
+        <div class="pager">
+          <button id="prev" aria-label="上一页">‹</button>
+          <span id="page-info">1 / 1</span>
+          <button id="next" aria-label="下一页">›</button>
+        </div>
+      </div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-title">节目</th>
+            <th class="col-cat">类型</th>
+            <th class="col-dur">时长</th>
+            <th class="col-dm">弹幕</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="5" class="empty">正在载入节目单…</td></tr>
+        </tbody>
+      </table>
+
+      <div class="stat" id="meta-line" style="margin-top:18px"></div>
+    </section>
+
+    <section class="view" id="view-schedule">
+      <div class="eyebrow">—— 节目单</div>
+      <h1 class="title sm">接下来播什么</h1>
+      <p class="sub">频道按固定时间轴循环。同一场在 111.7 小时内只出现一次，所以任意 24 小时内不会有重复。</p>
+
+      <div class="actions">
+        <button class="chip" data-horizon="86400">24 小时</button>
+        <button class="chip" data-horizon="259200">72 小时</button>
+        <button class="chip" data-horizon="0">整个循环</button>
+      </div>
+
+      <div class="list-head"><span class="stat" id="sch-stat">—</span></div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-time">开始</th>
+            <th class="col-title">节目</th>
+            <th class="col-cat">类型</th>
+            <th class="col-dur">时长</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="sch-rows"></tbody>
+      </table>
+    </section>
+
+    <section class="view" id="view-categories">
+      <div class="eyebrow">—— 分类</div>
+      <h1 class="title sm">按类型浏览</h1>
+      <p class="sub">分类同时决定排期池：在「24 小时频道」里取消某一类后，时间轴只会在剩下的类型里循环。</p>
+
+      <div class="cat-cards" id="cat-cards"></div>
+
+      <div class="list-head"><span class="stat" id="cat-stat">—</span></div>
+
+      <table class="list">
+        <thead>
+          <tr>
+            <th class="col-title">节目</th>
+            <th class="col-cat">类型</th>
+            <th class="col-dur">时长</th>
+            <th class="col-dm">弹幕</th>
+            <th class="col-act">播放</th>
+          </tr>
+        </thead>
+        <tbody id="cat-rows"></tbody>
+      </table>
+    </section>
+
+    <section class="view" id="view-about">
+      <div class="eyebrow">—— 关于</div>
+      <h1 class="title sm">关于这个频道</h1>
+      <div class="about-grid" id="about-body"></div>
+    </section>
+
+  </div>
+
+  <aside class="col-right">
+    <div class="player-box" id="player-box">
+      <video id="player" playsinline preload="metadata"></video>
+
+      <div class="pv-top">
+        <div class="pv-title" id="pv-title">—</div>
+        <div class="pv-topbtns">
+          <button class="pv-btn" id="btn-chapters">分段</button>
+          <button class="pv-btn" id="btn-mark">标注</button>
+          <button class="pv-btn" id="btn-quality">画质</button>
+          <button class="pv-btn" id="btn-login"><span id="login-label">登录</span></button>
+        </div>
+      </div>
+
+      <div class="pv-ctrl" id="pv-ctrl">
+        <div class="pv-progress" id="ctrl-progress" title="点击跳转">
+          <div class="pv-buffer" id="ctrl-buffer"></div>
+          <div class="pv-filled" id="ctrl-filled"></div>
+          <div class="pv-dot" id="ctrl-dot"></div>
+        </div>
+        <div class="pv-bar">
+          <button class="pv-ic" id="ctrl-play" title="播放 / 暂停">
+            <svg class="i-play" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4l13 8-13 8z"/></svg>
+            <svg class="i-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4h3.5v16H7zM13.5 4H17v16h-3.5z"/></svg>
+          </button>
+          <span class="pv-time"><span id="ctrl-cur">0:00</span><em>/</em><span id="ctrl-dur">0:00</span></span>
+          <div class="pv-volwrap">
+            <button class="pv-ic" id="ctrl-mute" title="静音">
+              <svg class="i-vol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 3.5v-13L8 9H4z"/><path d="M16 9.5a3.5 3.5 0 010 5M18.5 7a7 7 0 010 10"/></svg>
+              <svg class="i-mute" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 3.5v-13L8 9H4z"/><path d="M16 10l4 4M20 10l-4 4"/></svg>
+            </button>
+            <input type="range" id="ctrl-vol" class="pv-vol" min="0" max="1" step="0.05" value="1" title="音量">
+          </div>
+          <div class="pv-grow"></div>
+          <select class="pv-sel" id="quality" title="清晰度"><option value="80">清晰度…</option></select>
+          <button class="pv-ic pv-txt" id="btn-theater" title="网页全屏">宽屏</button>
+          <button class="pv-ic" id="ctrl-fs" title="全屏">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 011-1h4M15 4h4a1 1 0 011 1v4M20 15v4a1 1 0 01-1 1h-4M9 20H5a1 1 0 01-1-1v-4"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="login-panel" id="login-panel" hidden>
+        <div class="login-qr" id="login-qr"></div>
+        <div class="login-status" id="login-status">正在获取二维码…</div>
+        <div class="qp-btns">
+          <button class="btn small ghost" id="btn-logout" hidden>退出登录</button>
+          <button class="btn small ghost" id="btn-login-close">收起</button>
+        </div>
+      </div>
+
+      <div class="mute-hint" id="mute-hint">静音播放中 · 点「进入直播」开启声音</div>
+      <div class="offline-banner" id="offline-banner" hidden></div>
+    </div>
+
+    <div class="quality-panel" id="quality-panel" hidden>
+      <div class="qp-h">画质与 1080P</div>
+      <p>回放台用的是<b>自己的播放器</b>，清晰度由播放器右上角的<b>清晰度下拉框</b>直接切换，
+        不会跳去 B 站页面。视频流由本机服务代取，所以能在页面内直接播放。</p>
+      <p><b>未登录最高 480P</b>（接口虽列出 1080P 档位，但未登录时只实际下发 360P/480P）。
+        要 1080P 需要登录：点播放器右上角「<b>登录</b>」，
+        用 B 站 App 扫码即可，<b>整个过程都在本页完成</b>，不会离开回放台。</p>
+      <p>登录信息只保存在本机 <code>tools/sessdata.txt</code>，只发给 B 站自己的接口，
+        不经任何第三方。<b>本站不收集、不上传你的账号信息。</b></p>
+      <div class="qp-btns">
+        <button class="btn small primary" id="btn-login-2">扫码登录 B 站</button>
+        <button class="btn small ghost" id="btn-reload-player">重新加载当前片段</button>
+        <button class="btn small ghost" id="btn-qp-close">收起</button>
+      </div>
+    </div>
+
+    <div class="mark-panel" id="mark-panel" hidden>
+      <div class="qp-h">标注片段</div>
+      <p>片段由 <code>tools/auto_segments.py</code> 从音频响度自动检测，已写入
+        <code>data/segments.js</code>。这里用于<b>手工修正</b>个别不准的地方：
+        播放到片段开头按 <code>M</code>，到片段结尾再按 <code>M</code>，即成对记下一段。
+        标完把下面的 JSON 覆盖到 <code>data/segments.js</code>，再打开「跳过空白」。</p>
+      <div class="mp-cur" id="mark-cur">—</div>
+      <ol class="mp-list" id="mark-list"><li class="mp-empty">还没有标记</li></ol>
+      <div class="qp-btns">
+        <button class="btn small ghost" id="btn-mark-undo">撤销上一个</button>
+        <button class="btn small ghost" id="btn-mark-clear">清空本分P</button>
+      </div>
+      <textarea class="mp-json" id="mark-json" readonly rows="5" spellcheck="false"></textarea>
+    </div>
+
+    <div class="chapters-panel" id="chapters-panel" hidden>
+      <div class="qp-h">本场分段<span id="chapters-sub"></span></div>
+      <div class="chap-list" id="chap-list"></div>
+    </div>
+
+    <div class="np">
+      <div class="np-top">
+        <span class="badge" id="np-live">直播中</span>
+        <span class="np-cat" id="np-cat">—</span>
+      </div>
+      <div class="np-title" id="np-title">正在载入…</div>
+      <div class="np-meta" id="np-meta">—</div>
+      <div class="bar"><i id="np-bar"></i></div>
+      <div class="np-times"><span id="np-pos">--:--</span><span id="np-dur">--:--</span></div>
+      <div class="np-btns">
+        <button class="btn small primary" data-action="unmute">进入直播</button>
+        <button class="btn small ghost" data-action="resync">回到直播</button>
+        <button class="btn small ghost" id="btn-mutedef">默认静音：开</button>
+        <button class="btn small ghost" id="btn-skip">跳过空白：关</button>
+      </div>
+    </div>
+
+    <div class="next">
+      <div class="next-h">接下来</div>
+      <ol id="next-list"><li>—</li></ol>
+    </div>
+
+    <div class="credits">
+      非官方粉丝站，内容版权归 UP 主
+      <a href="https://space.bilibili.com/1512246445" target="_blank" rel="noopener">四时小路Komichi</a>
+      所有，视频流由本站播放器经 B 站接口代理播放（页内不含弹幕轨道）。<br>
+      数据来源：<a href="https://space.bilibili.com/1512246445/lists/5157110?type=series" target="_blank" rel="noopener">直播回放系列</a>
+    </div>
+  </aside>
+
+  <aside class="strip strip-right" id="strip-right">
+    <div class="strip-h">接下来</div>
+    <div class="strip-body" id="strip-right-body"></div>
+  </aside>
+</main>
+
+<!-- 小路状态：右下角悬浮按钮，点击展开面板。
+     默认收起，避免遮挡视频；有新内容时按钮显示红点提示。 -->
+<div class="status-dock" id="status-dock">
+  <button class="status-fab" id="status-fab" type="button"
+          aria-expanded="false" aria-controls="status-panel" title="小路状态">
+    <span class="status-fab-dot" id="status-fab-dot" hidden></span>
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+      <path d="M12 3a4 4 0 0 1 4 4v4.2l1.6 2.4a1 1 0 0 1-.83 1.55H7.23a1 1 0 0 1-.83-1.55L8 11.2V7a4 4 0 0 1 4-4Z"
+            fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+      <path d="M10 18.2a2.2 2.2 0 0 0 4 0" fill="none" stroke="currentColor"
+            stroke-width="1.7" stroke-linecap="round"/>
+    </svg>
+    <span class="status-fab-text">小路状态</span>
+  </button>
+
+  <div class="status-panel" id="status-panel" hidden>
+    <div class="status-panel-h">
+      <span>小路状态</span>
+      <div class="status-panel-tools">
+        <button class="status-mini" id="status-refresh" type="button" title="刷新">刷新</button>
+        <button class="status-mini" id="status-close" type="button" title="收起">收起</button>
+      </div>
+    </div>
+
+    <div class="status-panel-body" id="status-body">
+      <div class="status-loading" id="status-loading">正在获取最新状态…</div>
+    </div>
+
+    <div class="status-panel-f" id="status-foot"></div>
+  </div>
+</div>
+
+<script src="data/programs.js"></script>
+<script src="data/segments.js"></script>
+<script src="data/setlists.js"></script>
+<script src="data/labels.js"></script>
+<script src="assets/qrcode.min.js"></script>
+<script src="assets/dash.all.min.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

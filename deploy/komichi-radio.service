@@ -1,0 +1,53 @@
+# 二十四时小路电台 · systemd 单元（不用 Docker 的部署方式）
+#
+# 适用：服务器上已有系统 Python 3.11+，不想装 Docker。
+# 安装：
+#   sudo cp deploy/komichi-radio.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now komichi-radio
+#   sudo systemctl status komichi-radio
+#
+# 注意 WorkingDirectory 指向项目根，app.py 会从那里推导出 site/ 目录。
+
+[Unit]
+Description=二十四时小路电台 · 云端服务
+Documentation=file:/opt/komichi-radio/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=komichi
+Group=komichi
+WorkingDirectory=/opt/komichi-radio
+
+Environment=PYTHONUNBUFFERED=1
+Environment=PORT=8080
+Environment=BIND=0.0.0.0
+Environment=ALLOWED_HOSTS=
+Environment=PUBLIC_BASE=
+
+ExecStart=/usr/bin/python3 /opt/komichi-radio/cloud/server/app.py
+
+# 24 小时频道：崩溃即拉起
+Restart=always
+RestartSec=5
+
+# 进程安全加固：服务只需读文件 + 出网，不需要任何写权限
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+# 需要联网访问 B 站 API 与 CDN，因此不能开 PrivateNetwork
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=komichi-radio
+
+[Install]
+WantedBy=multi-user.target

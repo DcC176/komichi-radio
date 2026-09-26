@@ -1,0 +1,1418 @@
+{
+ "meta": {
+  "source": "https://space.bilibili.com/1512246445/lists/5157110?type=series",
+  "up_name": "四时小路Komichi",
+  "up_space": "https://space.bilibili.com/1512246445",
+  "mid": "1512246445",
+  "series_id": "5157110",
+  "generated_at": "2026-09-25 12:52:10",
+  "count": 42,
+  "part_count": 61,
+  "total_duration": 402152,
+  "total_danmaku": 1150159,
+  "categories": [
+   "唱歌",
+   "杂谈",
+   "游戏",
+   "联动",
+   "电台",
+   "特别回",
+   "其他"
+  ]
+ },
+ "programs": [
+  {
+   "bvid": "BV1rZaK6zEQP",
+   "aid": 117327030913459,
+   "title": "VR好音乐·和瑞瑞liko的音乐集市+",
+   "raw_title": "【直播回放】VR好音乐·和瑞瑞liko的音乐集市+ 2026年09月24日21点场",
+   "category": "电台",
+   "pubdate": 1790269231,
+   "date": "2026-09-25 01:00",
+   "duration": 13107,
+   "parts": [
+    {
+     "cid": 42173205124,
+     "page": 1,
+     "part": "0-VR好音乐·和瑞瑞liko的音乐集市+",
+     "duration": 7236,
+     "dm_total": 14445
+    },
+    {
+     "cid": 42173205511,
+     "page": 2,
+     "part": "1-VR好音乐·和瑞瑞liko的音乐集市+",
+     "duration": 5871,
+     "dm_total": 11720
+    }
+   ],
+   "view": 980,
+   "danmaku": 26165,
+   "reply": 14,
+   "like": 17,
+   "cover": "https://i2.hdslb.com/bfs/archive/15e8ae0c6197750e505e6c1b3f7bbb8bb6b591e2.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/15e8ae0c6197750e505e6c1b3f7bbb8bb6b591e2.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1rZaK6zEQP",
+   "dm_total": 26165,
+   "dm_per_hour": 7186.5,
+   "score": 62.2,
+   "dm_rank": 38.1
+  },
+  {
+   "bvid": "BV18Ghb61EEG",
+   "aid": 117321158888847,
+   "title": "大头组合劲爆和鱼搏斗+",
+   "raw_title": "【直播回放】大头组合劲爆和鱼搏斗+ 2026年09月23日20点场",
+   "category": "联动",
+   "pubdate": 1790179514,
+   "date": "2026-09-24 00:05",
+   "duration": 10293,
+   "parts": [
+    {
+     "cid": 42143383976,
+     "page": 1,
+     "part": "0-大头组合劲爆和鱼搏斗+",
+     "duration": 7234,
+     "dm_total": 16507
+    },
+    {
+     "cid": 42143384223,
+     "page": 2,
+     "part": "1-大头组合劲爆和鱼搏斗+",
+     "duration": 3059,
+     "dm_total": 6980
+    }
+   ],
+   "view": 752,
+   "danmaku": 23487,
+   "reply": 10,
+   "like": 8,
+   "cover": "https://i0.hdslb.com/bfs/archive/db23a29b4b0e5284bcdb4b587d6cf4c8cf4cfb2a.jpg",
+   "thumb": "https://i0.hdslb.com/bfs/archive/db23a29b4b0e5284bcdb4b587d6cf4c8cf4cfb2a.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV18Ghb61EEG",
+   "dm_total": 23487,
+   "dm_per_hour": 8214.6,
+   "score": 70.9,
+   "dm_rank": 54.8
+  },
+  {
+   "bvid": "BV1jshn6vEik",
+   "aid": 117315538520188,
+   "title": "四时小路小唱一下+",
+   "raw_title": "【直播回放】四时小路小唱一下+ 2026年09月22日20点场",
+   "category": "唱歌",
+   "pubdate": 1790093664,
+   "date": "2026-09-23 00:14",
+   "duration": 10651,
+   "parts": [
+    {
+     "cid": 42117366217,
+     "page": 1,
+     "part": "0-四时小路小唱一下+",
+     "duration": 7234,
+     "dm_total": 26603
+    },
+    {
+     "cid": 42117366199,
+     "page": 2,
+     "part": "1-四时小路小唱一下+",
+     "duration": 3417,
+     "dm_total": 12566
+    }
+   ],
+   "view": 1912,
+   "danmaku": 39169,
+   "reply": 11,
+   "like": 34,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1jshn6vEik",
+   "dm_total": 39169,
+   "dm_per_hour": 13239.0,
+   "score": 83.9,
+   "dm_rank": 78.6
+  },
+  {
+   "bvid": "BV17bhe6gELL",
+   "aid": 117306898319890,
+   "title": "四时小路的音乐分享电台·第7期+",
+   "raw_title": "【直播回放】四时小路的音乐分享电台·第7期+ 2026年09月21日07点场",
+   "category": "电台",
+   "pubdate": 1789961761,
+   "date": "2026-09-21 11:36",
+   "duration": 12126,
+   "parts": [
+    {
+     "cid": 42070248768,
+     "page": 1,
+     "part": "0-四时小路的音乐分享电台·第7期+",
+     "duration": 7234,
+     "dm_total": 7483
+    },
+    {
+     "cid": 42070249044,
+     "page": 2,
+     "part": "1-四时小路的音乐分享电台·第7期+",
+     "duration": 4892,
+     "dm_total": 5060
+    }
+   ],
+   "view": 1675,
+   "danmaku": 12543,
+   "reply": 10,
+   "like": 28,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV17bhe6gELL",
+   "dm_total": 12543,
+   "dm_per_hour": 3723.8,
+   "score": 39.2,
+   "dm_rank": 7.1
+  },
+  {
+   "bvid": "BV1kLe86VEzp",
+   "aid": 117298610308245,
+   "title": "四时小路只是在闲聊+",
+   "raw_title": "【直播回放】四时小路只是在闲聊+ 2026年09月19日21点场",
+   "category": "杂谈",
+   "pubdate": 1789836783,
+   "date": "2026-09-20 00:53",
+   "duration": 11680,
+   "parts": [
+    {
+     "cid": 42036429768,
+     "page": 1,
+     "part": "0-四时小路只是在闲聊+",
+     "duration": 7234,
+     "dm_total": 20902
+    },
+    {
+     "cid": 42036429635,
+     "page": 2,
+     "part": "1-四时小路只是在闲聊+",
+     "duration": 4446,
+     "dm_total": 12846
+    }
+   ],
+   "view": 1959,
+   "danmaku": 33748,
+   "reply": 21,
+   "like": 33,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1kLe86VEzp",
+   "dm_total": 33748,
+   "dm_per_hour": 10401.8,
+   "score": 70.4,
+   "dm_rank": 61.9
+  },
+  {
+   "bvid": "BV17yeb6vEGZ",
+   "aid": 117297066870863,
+   "title": "四时小路只是在捉可爱宠物+",
+   "raw_title": "【直播回放】四时小路只是在捉可爱宠物+ 2026年09月19日16点场",
+   "category": "游戏",
+   "pubdate": 1789811714,
+   "date": "2026-09-19 17:55",
+   "duration": 4576,
+   "parts": [
+    {
+     "cid": 42027321714,
+     "page": 1,
+     "part": "四时小路只是在捉可爱宠物+",
+     "duration": 4576,
+     "dm_total": 5687
+    }
+   ],
+   "view": 422,
+   "danmaku": 5687,
+   "reply": 4,
+   "like": 16,
+   "cover": "https://i2.hdslb.com/bfs/archive/e0ef53c1def3bc3e948f21193b1a5f685e11a23b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/e0ef53c1def3bc3e948f21193b1a5f685e11a23b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV17yeb6vEGZ",
+   "dm_total": 5687,
+   "dm_per_hour": 4474.0,
+   "score": 43.0,
+   "dm_rank": 16.7
+  },
+  {
+   "bvid": "BV1qae36SEUG",
+   "aid": 117286883101449,
+   "title": "287模仿派对联动+",
+   "raw_title": "【直播回放】287模仿派对联动+ 2026年09月17日21点场",
+   "category": "联动",
+   "pubdate": 1789656282,
+   "date": "2026-09-17 22:44",
+   "duration": 5259,
+   "parts": [
+    {
+     "cid": 41978561345,
+     "page": 1,
+     "part": "287模仿派对联动+",
+     "duration": 5259,
+     "dm_total": 17272
+    }
+   ],
+   "view": 1871,
+   "danmaku": 17272,
+   "reply": 19,
+   "like": 42,
+   "cover": "https://i1.hdslb.com/bfs/archive/aaa23e680a7c1f6b333c5f126bdf4c7571c145cf.jpg",
+   "thumb": "https://i1.hdslb.com/bfs/archive/aaa23e680a7c1f6b333c5f126bdf4c7571c145cf.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1qae36SEUG",
+   "dm_total": 17272,
+   "dm_per_hour": 11823.4,
+   "score": 73.9,
+   "dm_rank": 71.4
+  },
+  {
+   "bvid": "BV1V6e365EyC",
+   "aid": 117286530714407,
+   "title": "四时小路只是在寻找可爱萌宠+",
+   "raw_title": "【直播回放】四时小路只是在寻找可爱萌宠+ 2026年09月17日19点场",
+   "category": "游戏",
+   "pubdate": 1789650846,
+   "date": "2026-09-17 21:14",
+   "duration": 3742,
+   "parts": [
+    {
+     "cid": 41976465455,
+     "page": 1,
+     "part": "四时小路只是在寻找可爱萌宠+",
+     "duration": 3742,
+     "dm_total": 4606
+    }
+   ],
+   "view": 523,
+   "danmaku": 4606,
+   "reply": 1,
+   "like": 6,
+   "cover": "https://i2.hdslb.com/bfs/archive/e0ef53c1def3bc3e948f21193b1a5f685e11a23b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/e0ef53c1def3bc3e948f21193b1a5f685e11a23b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1V6e365EyC",
+   "dm_total": 4606,
+   "dm_per_hour": 4431.2,
+   "score": 39.6,
+   "dm_rank": 14.3
+  },
+  {
+   "bvid": "BV1EFeK6TEdP",
+   "aid": 117281598277563,
+   "title": "【港诡实录】再战港诡+",
+   "raw_title": "【直播回放】【港诡实录】再战港诡+ 2026年09月16日20点场",
+   "category": "游戏",
+   "pubdate": 1789576416,
+   "date": "2026-09-17 00:33",
+   "duration": 14326,
+   "parts": [
+    {
+     "cid": 41953329409,
+     "page": 1,
+     "part": "0-【港诡实录】再战港诡+",
+     "duration": 7234,
+     "dm_total": 18090
+    },
+    {
+     "cid": 41953329693,
+     "page": 2,
+     "part": "1-【港诡实录】再战港诡+",
+     "duration": 7092,
+     "dm_total": 17735
+    }
+   ],
+   "view": 1399,
+   "danmaku": 35825,
+   "reply": 4,
+   "like": 20,
+   "cover": "https://i1.hdslb.com/bfs/archive/90f1c2fa14ee520ff340d3acb7505520f1a80202.jpg",
+   "thumb": "https://i1.hdslb.com/bfs/archive/90f1c2fa14ee520ff340d3acb7505520f1a80202.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1EFeK6TEdP",
+   "dm_total": 35825,
+   "dm_per_hour": 9002.5,
+   "score": 64.4,
+   "dm_rank": 57.1
+  },
+  {
+   "bvid": "BV1wTe56eECW",
+   "aid": 117269887715872,
+   "title": "和小路一起看看二创+",
+   "raw_title": "【直播回放】和小路一起看看二创+ 2026年09月14日20点场",
+   "category": "杂谈",
+   "pubdate": 1789397299,
+   "date": "2026-09-14 22:48",
+   "duration": 8646,
+   "parts": [
+    {
+     "cid": 41894414401,
+     "page": 1,
+     "part": "和小路一起看看二创+",
+     "duration": 8646,
+     "dm_total": 16664
+    }
+   ],
+   "view": 1407,
+   "danmaku": 16664,
+   "reply": 4,
+   "like": 17,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1wTe56eECW",
+   "dm_total": 16664,
+   "dm_per_hour": 6938.5,
+   "score": 49.5,
+   "dm_rank": 35.7
+  },
+  {
+   "bvid": "BV1xnYr61E5n",
+   "aid": 117267320801471,
+   "title": "四时小路的音乐电台·第6期+",
+   "raw_title": "【直播回放】四时小路的音乐电台·第6期+ 2026年09月14日09点场",
+   "category": "电台",
+   "pubdate": 1789358263,
+   "date": "2026-09-14 11:57",
+   "duration": 9142,
+   "parts": [
+    {
+     "cid": 41876196777,
+     "page": 1,
+     "part": "四时小路的音乐电台·第6期+",
+     "duration": 9142,
+     "dm_total": 10588
+    }
+   ],
+   "view": 1692,
+   "danmaku": 10588,
+   "reply": 4,
+   "like": 30,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1xnYr61E5n",
+   "dm_total": 10588,
+   "dm_per_hour": 4169.4,
+   "score": 34.8,
+   "dm_rank": 11.9
+  },
+  {
+   "bvid": "BV15MYR6wEEB",
+   "aid": 117258932193914,
+   "title": "【联动】好多人的封锁协议+",
+   "raw_title": "【直播回放】【联动】好多人的封锁协议+ 2026年09月12日20点场",
+   "category": "联动",
+   "pubdate": 1789230370,
+   "date": "2026-09-13 00:26",
+   "duration": 11023,
+   "parts": [
+    {
+     "cid": 41834447316,
+     "page": 1,
+     "part": "0-【联动】好多人的封锁协议+",
+     "duration": 7234,
+     "dm_total": 12214
+    },
+    {
+     "cid": 41834447745,
+     "page": 2,
+     "part": "1-【联动】好多人的封锁协议+",
+     "duration": 3789,
+     "dm_total": 6397
+    }
+   ],
+   "view": 1638,
+   "danmaku": 18611,
+   "reply": 7,
+   "like": 15,
+   "cover": "https://i0.hdslb.com/bfs/archive/45bd6f20375150bb97f7f5a25fea308a147c3cd1.jpg",
+   "thumb": "https://i0.hdslb.com/bfs/archive/45bd6f20375150bb97f7f5a25fea308a147c3cd1.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV15MYR6wEEB",
+   "dm_total": 18611,
+   "dm_per_hour": 6078.2,
+   "score": 42.1,
+   "dm_rank": 26.2
+  },
+  {
+   "bvid": "BV1j6YX6aEZg",
+   "aid": 117257539749241,
+   "title": "四时小路小唱一下+",
+   "raw_title": "【直播回放】四时小路小唱一下+ 2026年09月12日16点场",
+   "category": "唱歌",
+   "pubdate": 1789208759,
+   "date": "2026-09-12 18:25",
+   "duration": 7665,
+   "parts": [
+    {
+     "cid": 41824682696,
+     "page": 1,
+     "part": "四时小路小唱一下+",
+     "duration": 7665,
+     "dm_total": 16369
+    }
+   ],
+   "view": 1798,
+   "danmaku": 16369,
+   "reply": 5,
+   "like": 36,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1j6YX6aEZg",
+   "dm_total": 16369,
+   "dm_per_hour": 7688.0,
+   "score": 54.7,
+   "dm_rank": 47.6
+  },
+  {
+   "bvid": "BV1BCY36EE7T",
+   "aid": 117247456643646,
+   "title": "287满月特别联动·大家一起喝饮料吧+",
+   "raw_title": "【直播回放】287满月特别联动·大家一起喝饮料吧+ 2026年09月10日21点场",
+   "category": "联动",
+   "pubdate": 1789055007,
+   "date": "2026-09-10 23:43",
+   "duration": 8171,
+   "parts": [
+    {
+     "cid": 41767864648,
+     "page": 1,
+     "part": "287满月特别联动·大家一起喝饮料吧+",
+     "duration": 8171,
+     "dm_total": 73896
+    }
+   ],
+   "view": 6388,
+   "danmaku": 73896,
+   "reply": 56,
+   "like": 229,
+   "cover": "https://i2.hdslb.com/bfs/archive/2f36f10f6cfea4756c699bae7a6cb006890a8e3a.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/2f36f10f6cfea4756c699bae7a6cb006890a8e3a.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1BCY36EE7T",
+   "dm_total": 73896,
+   "dm_per_hour": 32557.3,
+   "score": 81.8,
+   "dm_rank": 95.2
+  },
+  {
+   "bvid": "BV1HtYE6kEzF",
+   "aid": 117236316572339,
+   "title": "四时小路只是在闲聊+",
+   "raw_title": "【直播回放】四时小路只是在闲聊+ 2026年09月08日21点场",
+   "category": "杂谈",
+   "pubdate": 1788885095,
+   "date": "2026-09-09 00:31",
+   "duration": 8045,
+   "parts": [
+    {
+     "cid": 41702918604,
+     "page": 1,
+     "part": "四时小路只是在闲聊+",
+     "duration": 8045,
+     "dm_total": 21530
+    }
+   ],
+   "view": 1957,
+   "danmaku": 21530,
+   "reply": 13,
+   "like": 38,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1HtYE6kEzF",
+   "dm_total": 21530,
+   "dm_per_hour": 9634.3,
+   "score": 58.8,
+   "dm_rank": 59.5
+  },
+  {
+   "bvid": "BV1Uabw6cEbL",
+   "aid": 117227525376000,
+   "title": "四时小路音乐分享电台·第5期+",
+   "raw_title": "【直播回放】四时小路音乐分享电台·第5期+ 2026年09月07日08点场",
+   "category": "电台",
+   "pubdate": 1788750614,
+   "date": "2026-09-07 11:10",
+   "duration": 10371,
+   "parts": [
+    {
+     "cid": 41653571476,
+     "page": 1,
+     "part": "0-四时小路音乐分享电台·第5期+",
+     "duration": 7234,
+     "dm_total": 6167
+    },
+    {
+     "cid": 41653633202,
+     "page": 2,
+     "part": "1-四时小路音乐分享电台·第5期+",
+     "duration": 3137,
+     "dm_total": 2674
+    }
+   ],
+   "view": 2497,
+   "danmaku": 8841,
+   "reply": 11,
+   "like": 46,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1Uabw6cEbL",
+   "dm_total": 8841,
+   "dm_per_hour": 3068.9,
+   "score": 24.8,
+   "dm_rank": 4.8
+  },
+  {
+   "bvid": "BV16ptf6zEng",
+   "aid": 117207845570533,
+   "title": "四时小路只是在公园闲聊+",
+   "raw_title": "【直播回放】四时小路只是在公园闲聊+ 2026年09月03日21点场",
+   "category": "杂谈",
+   "pubdate": 1788452755,
+   "date": "2026-09-04 00:25",
+   "duration": 9109,
+   "parts": [
+    {
+     "cid": 41558018558,
+     "page": 1,
+     "part": "四时小路只是在公园闲聊+",
+     "duration": 9109,
+     "dm_total": 20416
+    }
+   ],
+   "view": 2745,
+   "danmaku": 20416,
+   "reply": 23,
+   "like": 61,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV16ptf6zEng",
+   "dm_total": 20416,
+   "dm_per_hour": 8068.7,
+   "score": 51.0,
+   "dm_rank": 52.4
+  },
+  {
+   "bvid": "BV1PztD6oEbx",
+   "aid": 117202242112770,
+   "title": "四时小路只是在轻声唱歌+",
+   "raw_title": "【直播回放】四时小路只是在轻声唱歌+ 2026年09月02日21点场",
+   "category": "唱歌",
+   "pubdate": 1788365306,
+   "date": "2026-09-03 00:08",
+   "duration": 9570,
+   "parts": [
+    {
+     "cid": 41529181414,
+     "page": 1,
+     "part": "四时小路只是在轻声唱歌+",
+     "duration": 9570,
+     "dm_total": 33347
+    }
+   ],
+   "view": 2233,
+   "danmaku": 33347,
+   "reply": 14,
+   "like": 45,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1PztD6oEbx",
+   "dm_total": 33347,
+   "dm_per_hour": 12544.3,
+   "score": 63.2,
+   "dm_rank": 73.8
+  },
+  {
+   "bvid": "BV1bAtV6dEcG",
+   "aid": 117196470683117,
+   "title": "四时小路只是在狡辩+",
+   "raw_title": "【直播回放】四时小路只是在狡辩+ 2026年09月01日20点场",
+   "category": "杂谈",
+   "pubdate": 1788277127,
+   "date": "2026-09-01 23:38",
+   "duration": 8417,
+   "parts": [
+    {
+     "cid": 41500410441,
+     "page": 1,
+     "part": "四时小路只是在狡辩+",
+     "duration": 8417,
+     "dm_total": 77224
+    }
+   ],
+   "view": 2716,
+   "danmaku": 77224,
+   "reply": 16,
+   "like": 75,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1bAtV6dEcG",
+   "dm_total": 77224,
+   "dm_per_hour": 33029.2,
+   "score": 76.8,
+   "dm_rank": 97.6
+  },
+  {
+   "bvid": "BV1f1tx6yEte",
+   "aid": 117188065233728,
+   "title": "四时小路的音乐分享电台·第4期+",
+   "raw_title": "【直播回放】四时小路的音乐分享电台·第4期+ 2026年08月31日07点场",
+   "category": "电台",
+   "pubdate": 1788148758,
+   "date": "2026-08-31 11:59",
+   "duration": 9942,
+   "parts": [
+    {
+     "cid": 41449751741,
+     "page": 1,
+     "part": "四时小路的音乐分享电台·第4期+",
+     "duration": 9942,
+     "dm_total": 11502
+    }
+   ],
+   "view": 2099,
+   "danmaku": 11502,
+   "reply": 15,
+   "like": 58,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1f1tx6yEte",
+   "dm_total": 11502,
+   "dm_per_hour": 4164.9,
+   "score": 23.1,
+   "dm_rank": 9.5
+  },
+  {
+   "bvid": "BV17NtW6NEFe",
+   "aid": 117185330546150,
+   "title": "【联动】和前辈们一起玩破烂+",
+   "raw_title": "【直播回放】【联动】和前辈们一起玩破烂+ 2026年08月30日20点场",
+   "category": "联动",
+   "pubdate": 1788107055,
+   "date": "2026-08-31 00:24",
+   "duration": 10930,
+   "parts": [
+    {
+     "cid": 41438611648,
+     "page": 1,
+     "part": "0-【联动】和前辈们一起玩破烂+",
+     "duration": 7234,
+     "dm_total": 15088
+    },
+    {
+     "cid": 41438611580,
+     "page": 2,
+     "part": "1-【联动】和前辈们一起玩破烂+",
+     "duration": 3696,
+     "dm_total": 7709
+    }
+   ],
+   "view": 1319,
+   "danmaku": 22797,
+   "reply": 2,
+   "like": 15,
+   "cover": "https://i2.hdslb.com/bfs/archive/49b255aed473383aeb42050f17999b82b628e4b8.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/49b255aed473383aeb42050f17999b82b628e4b8.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV17NtW6NEFe",
+   "dm_total": 22797,
+   "dm_per_hour": 7508.6,
+   "score": 44.2,
+   "dm_rank": 45.2
+  },
+  {
+   "bvid": "BV1yk4d6KEJC",
+   "aid": 117168553461535,
+   "title": "【港诡实录】中元节恐怖游戏+",
+   "raw_title": "【直播回放】【港诡实录】中元节恐怖游戏+ 2026年08月27日20点场",
+   "category": "游戏",
+   "pubdate": 1787852822,
+   "date": "2026-08-28 01:47",
+   "duration": 14750,
+   "parts": [
+    {
+     "cid": 41337032452,
+     "page": 1,
+     "part": "0-【港诡实录】中元节恐怖游戏+",
+     "duration": 7234,
+     "dm_total": 13772
+    },
+    {
+     "cid": 41337032453,
+     "page": 2,
+     "part": "1-【港诡实录】中元节恐怖游戏+",
+     "duration": 7516,
+     "dm_total": 14309
+    }
+   ],
+   "view": 2300,
+   "danmaku": 28081,
+   "reply": 4,
+   "like": 40,
+   "cover": "https://i2.hdslb.com/bfs/archive/8df66edccf6bb2ffc849a858bc7643217fcdb2f1.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/8df66edccf6bb2ffc849a858bc7643217fcdb2f1.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1yk4d6KEJC",
+   "dm_total": 28081,
+   "dm_per_hour": 6853.7,
+   "score": 35.5,
+   "dm_rank": 33.3
+  },
+  {
+   "bvid": "BV1EWhF61EgR",
+   "aid": 117165466389898,
+   "title": "虚无俄罗斯方块闲聊+",
+   "raw_title": "【直播回放】虚无俄罗斯方块闲聊+ 2026年08月26日20点场",
+   "category": "游戏",
+   "pubdate": 1787804112,
+   "date": "2026-08-27 12:15",
+   "duration": 9041,
+   "parts": [
+    {
+     "cid": 41312322791,
+     "page": 1,
+     "part": "虚无俄罗斯方块闲聊+",
+     "duration": 9041,
+     "dm_total": 31605
+    }
+   ],
+   "view": 1741,
+   "danmaku": 31605,
+   "reply": 2,
+   "like": 33,
+   "cover": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/27727c1cfeed80252b3eb5058603def3be6dd941.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1EWhF61EgR",
+   "dm_total": 31605,
+   "dm_per_hour": 12584.7,
+   "score": 60.9,
+   "dm_rank": 76.2
+  },
+  {
+   "bvid": "BV1ZJ8Z6zEQe",
+   "aid": 117162530311662,
+   "title": "突击电台",
+   "raw_title": "【直播回放】突击电台 2026年08月18日21点场",
+   "category": "电台",
+   "pubdate": 1787758824,
+   "date": "2026-08-26 23:40",
+   "duration": 2349,
+   "parts": [
+    {
+     "cid": 41298495580,
+     "page": 1,
+     "part": "突击电台",
+     "duration": 2349,
+     "dm_total": 4833
+    }
+   ],
+   "view": 1072,
+   "danmaku": 4833,
+   "reply": 9,
+   "like": 23,
+   "cover": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1ZJ8Z6zEQe",
+   "dm_total": 4833,
+   "dm_per_hour": 7406.9,
+   "score": 40.7,
+   "dm_rank": 42.9
+  },
+  {
+   "bvid": "BV1fJ8Z6zEDR",
+   "aid": 117162530308840,
+   "title": "突击电台",
+   "raw_title": "【直播回放】突击电台 2026年08月18日21点场",
+   "category": "电台",
+   "pubdate": 1787758776,
+   "date": "2026-08-26 23:39",
+   "duration": 2854,
+   "parts": [
+    {
+     "cid": 41298495475,
+     "page": 1,
+     "part": "突击电台",
+     "duration": 2854,
+     "dm_total": 12230
+    }
+   ],
+   "view": 720,
+   "danmaku": 12230,
+   "reply": 1,
+   "like": 17,
+   "cover": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1fJ8Z6zEDR",
+   "dm_total": 12230,
+   "dm_per_hour": 15426.8,
+   "score": 64.9,
+   "dm_rank": 83.3
+  },
+  {
+   "bvid": "BV1JR8Y6zEjK",
+   "aid": 117148101903497,
+   "title": "一起来看冰火+",
+   "raw_title": "【直播回放】一起来看冰火+ 2026年08月23日18点场",
+   "category": "游戏",
+   "pubdate": 1787539119,
+   "date": "2026-08-24 10:38",
+   "duration": 12043,
+   "parts": [
+    {
+     "cid": 41206549487,
+     "page": 1,
+     "part": "0-一起来看冰火+",
+     "duration": 7234,
+     "dm_total": 22429
+    },
+    {
+     "cid": 41206549294,
+     "page": 2,
+     "part": "1-一起来看冰火+",
+     "duration": 4809,
+     "dm_total": 14911
+    }
+   ],
+   "view": 1853,
+   "danmaku": 37340,
+   "reply": 12,
+   "like": 25,
+   "cover": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1JR8Y6zEjK",
+   "dm_total": 37340,
+   "dm_per_hour": 11162.0,
+   "score": 53.7,
+   "dm_rank": 66.7
+  },
+  {
+   "bvid": "BV1WR8U6REpc",
+   "aid": 117140334118442,
+   "title": "【特别回】永远怀念四时小路的笔记本兄弟+",
+   "raw_title": "【直播回放】【特别回】永远怀念四时小路的笔记本兄弟+ 2026年08月22日20点场",
+   "category": "特别回",
+   "pubdate": 1787420273,
+   "date": "2026-08-23 01:37",
+   "duration": 6129,
+   "parts": [
+    {
+     "cid": 41170243095,
+     "page": 1,
+     "part": "【特别回】永远怀念四时小路的笔记本兄弟+",
+     "duration": 6129,
+     "dm_total": 23430
+    }
+   ],
+   "view": 2137,
+   "danmaku": 23430,
+   "reply": 6,
+   "like": 51,
+   "cover": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1WR8U6REpc",
+   "dm_total": 23430,
+   "dm_per_hour": 13762.1,
+   "score": 61.7,
+   "dm_rank": 81.0
+  },
+  {
+   "bvid": "BV1Tz8y6JEqK",
+   "aid": 117138639553785,
+   "title": "四时小路只是小唱一下再看看提问箱+",
+   "raw_title": "【直播回放】四时小路只是小唱一下再看看提问箱+ 2026年08月22日15点场",
+   "category": "唱歌",
+   "pubdate": 1787394617,
+   "date": "2026-08-22 18:30",
+   "duration": 10054,
+   "parts": [
+    {
+     "cid": 41158839289,
+     "page": 1,
+     "part": "四时小路只是小唱一下再看看提问箱+",
+     "duration": 10054,
+     "dm_total": 16975
+    }
+   ],
+   "view": 2190,
+   "danmaku": 16975,
+   "reply": 6,
+   "like": 49,
+   "cover": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1Tz8y6JEqK",
+   "dm_total": 16975,
+   "dm_per_hour": 6078.2,
+   "score": 28.7,
+   "dm_rank": 26.2
+  },
+  {
+   "bvid": "BV1A28y6yEZK",
+   "aid": 117138555669393,
+   "title": "【联动】好多人啊！的致命VR公司+",
+   "raw_title": "【直播回放】【联动】好多人啊！的致命VR公司+ 2026年08月21日19点场",
+   "category": "联动",
+   "pubdate": 1787393221,
+   "date": "2026-08-22 18:07",
+   "duration": 14434,
+   "parts": [
+    {
+     "cid": 41158838491,
+     "page": 1,
+     "part": "0-【联动】好多人啊！的致命VR公司+",
+     "duration": 7234,
+     "dm_total": 10509
+    },
+    {
+     "cid": 41158838614,
+     "page": 2,
+     "part": "1-【联动】好多人啊！的致命VR公司+",
+     "duration": 7200,
+     "dm_total": 10460
+    }
+   ],
+   "view": 1047,
+   "danmaku": 20969,
+   "reply": 1,
+   "like": 19,
+   "cover": "https://i0.hdslb.com/bfs/archive/e3b819f8703f3564b746573e5ff9d1e5b2d3dcb0.jpg",
+   "thumb": "https://i0.hdslb.com/bfs/archive/e3b819f8703f3564b746573e5ff9d1e5b2d3dcb0.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1A28y6yEZK",
+   "dm_total": 20969,
+   "dm_per_hour": 5229.9,
+   "score": 24.4,
+   "dm_rank": 19.0
+  },
+  {
+   "bvid": "BV1Kn8F69EjV",
+   "aid": 117126190859390,
+   "title": "【锈湖：湖之仆从】四时小路只是在玩游戏+",
+   "raw_title": "【直播回放】【锈湖：湖之仆从】四时小路只是在玩游戏+ 2026年08月19日20点场",
+   "category": "游戏",
+   "pubdate": 1787204462,
+   "date": "2026-08-20 13:41",
+   "duration": 20310,
+   "parts": [
+    {
+     "cid": 41087273774,
+     "page": 1,
+     "part": "0-【锈湖：湖之仆从】四时小路只是在玩游戏+",
+     "duration": 7234,
+     "dm_total": 12804
+    },
+    {
+     "cid": 41087273997,
+     "page": 2,
+     "part": "1-【锈湖：湖之仆从】四时小路只是在玩游戏+",
+     "duration": 7234,
+     "dm_total": 12804
+    },
+    {
+     "cid": 41087273976,
+     "page": 3,
+     "part": "2-【锈湖：湖之仆从】四时小路只是在玩游戏+",
+     "duration": 5842,
+     "dm_total": 10340
+    }
+   ],
+   "view": 2260,
+   "danmaku": 35947,
+   "reply": 16,
+   "like": 35,
+   "cover": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/55183b5bedbb1c599071f608b5291d8a1fcdba02.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1Kn8F69EjV",
+   "dm_total": 35947,
+   "dm_per_hour": 6371.7,
+   "score": 29.2,
+   "dm_rank": 28.6
+  },
+  {
+   "bvid": "BV1czb86FEw2",
+   "aid": 117108524451614,
+   "title": "四时小路的音乐分享电台·第2期+",
+   "raw_title": "【直播回放】四时小路的音乐分享电台·第2期+ 2026年08月17日07点场",
+   "category": "电台",
+   "pubdate": 1786934998,
+   "date": "2026-08-17 10:49",
+   "duration": 9009,
+   "parts": [
+    {
+     "cid": 40981955846,
+     "page": 1,
+     "part": "四时小路的音乐分享电台·第2期+",
+     "duration": 9009,
+     "dm_total": 6490
+    }
+   ],
+   "view": 4283,
+   "danmaku": 6490,
+   "reply": 19,
+   "like": 97,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1czb86FEw2",
+   "dm_total": 6490,
+   "dm_per_hour": 2593.4,
+   "score": 12.3,
+   "dm_rank": 2.4
+  },
+  {
+   "bvid": "BV1hwbd6nEze",
+   "aid": 117105739501230,
+   "title": "【联动】287首次会晤捡垃圾+",
+   "raw_title": "【直播回放】【联动】287首次会晤捡垃圾+ 2026年08月16日18点场",
+   "category": "联动",
+   "pubdate": 1786892893,
+   "date": "2026-08-16 23:08",
+   "duration": 13714,
+   "parts": [
+    {
+     "cid": 40971470425,
+     "page": 1,
+     "part": "0-【联动】287首次会晤捡垃圾+",
+     "duration": 7234,
+     "dm_total": 11863
+    },
+    {
+     "cid": 40971470378,
+     "page": 2,
+     "part": "1-【联动】287首次会晤捡垃圾+",
+     "duration": 6480,
+     "dm_total": 10626
+    }
+   ],
+   "view": 2773,
+   "danmaku": 22489,
+   "reply": 7,
+   "like": 53,
+   "cover": "https://i1.hdslb.com/bfs/archive/4f455b106ed16ba04fe8ba049c4c53d20a654e07.jpg",
+   "thumb": "https://i1.hdslb.com/bfs/archive/4f455b106ed16ba04fe8ba049c4c53d20a654e07.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1hwbd6nEze",
+   "dm_total": 22489,
+   "dm_per_hour": 5903.5,
+   "score": 23.6,
+   "dm_rank": 21.4
+  },
+  {
+   "bvid": "BV12rbS6bEL6",
+   "aid": 117102803422874,
+   "title": "四时小路只是在唱歌+",
+   "raw_title": "【直播回放】四时小路只是在唱歌+ 2026年08月15日19点场",
+   "category": "唱歌",
+   "pubdate": 1786847746,
+   "date": "2026-08-16 10:35",
+   "duration": 11446,
+   "parts": [
+    {
+     "cid": 40953055054,
+     "page": 1,
+     "part": "0-四时小路只是在唱歌+",
+     "duration": 7234,
+     "dm_total": 22668
+    },
+    {
+     "cid": 40953055053,
+     "page": 2,
+     "part": "1-四时小路只是在唱歌+",
+     "duration": 4212,
+     "dm_total": 13198
+    }
+   ],
+   "view": 3583,
+   "danmaku": 35866,
+   "reply": 10,
+   "like": 78,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV12rbS6bEL6",
+   "dm_total": 35866,
+   "dm_per_hour": 11280.6,
+   "score": 51.9,
+   "dm_rank": 69.0
+  },
+  {
+   "bvid": "BV1Eigg6REp3",
+   "aid": 117097854208924,
+   "title": "【万言堂代笔工坊】四时小路只是在玩游戏+",
+   "raw_title": "【直播回放】【万言堂代笔工坊】四时小路只是在玩游戏+ 2026年08月15日09点场",
+   "category": "游戏",
+   "pubdate": 1786772182,
+   "date": "2026-08-15 13:36",
+   "duration": 9484,
+   "parts": [
+    {
+     "cid": 40927300326,
+     "page": 1,
+     "part": "【万言堂代笔工坊】四时小路只是在玩游戏+",
+     "duration": 9484,
+     "dm_total": 19062
+    }
+   ],
+   "view": 2095,
+   "danmaku": 19062,
+   "reply": 7,
+   "like": 45,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1Eigg6REp3",
+   "dm_total": 19062,
+   "dm_per_hour": 7235.7,
+   "score": 34.5,
+   "dm_rank": 40.5
+  },
+  {
+   "bvid": "BV1wsgM6sEu3",
+   "aid": 117094800690246,
+   "title": "【魔女之家】四时小路只是在玩游戏+",
+   "raw_title": "【直播回放】【魔女之家】四时小路只是在玩游戏+ 2026年08月14日20点场",
+   "category": "游戏",
+   "pubdate": 1786725836,
+   "date": "2026-08-15 00:43",
+   "duration": 11960,
+   "parts": [
+    {
+     "cid": 40916421802,
+     "page": 1,
+     "part": "0-【魔女之家】四时小路只是在玩游戏+",
+     "duration": 7234,
+     "dm_total": 21568
+    },
+    {
+     "cid": 40916421752,
+     "page": 2,
+     "part": "1-【魔女之家】四时小路只是在玩游戏+",
+     "duration": 4726,
+     "dm_total": 14090
+    }
+   ],
+   "view": 2567,
+   "danmaku": 35658,
+   "reply": 6,
+   "like": 49,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1wsgM6sEu3",
+   "dm_total": 35658,
+   "dm_per_hour": 10733.2,
+   "score": 48.6,
+   "dm_rank": 64.3
+  },
+  {
+   "bvid": "BV1xBgE6xENp",
+   "aid": 117085942384367,
+   "title": "四时小路只是小唱一下+",
+   "raw_title": "【直播回放】四时小路只是小唱一下+ 2026年08月13日08点场",
+   "category": "唱歌",
+   "pubdate": 1786590498,
+   "date": "2026-08-13 11:08",
+   "duration": 7506,
+   "parts": [
+    {
+     "cid": 40861371403,
+     "page": 1,
+     "part": "四时小路只是小唱一下+",
+     "duration": 7506,
+     "dm_total": 16586
+    }
+   ],
+   "view": 4376,
+   "danmaku": 16586,
+   "reply": 7,
+   "like": 119,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1xBgE6xENp",
+   "dm_total": 16586,
+   "dm_per_hour": 7954.9,
+   "score": 39.5,
+   "dm_rank": 50.0
+  },
+  {
+   "bvid": "BV16Agj6rE4u",
+   "aid": 117083341916930,
+   "title": "四时小路只是在回答提问+",
+   "raw_title": "【直播回放】四时小路只是在回答提问+ 2026年08月12日20点场",
+   "category": "杂谈",
+   "pubdate": 1786550688,
+   "date": "2026-08-13 00:04",
+   "duration": 11104,
+   "parts": [
+    {
+     "cid": 40851933061,
+     "page": 1,
+     "part": "0-四时小路只是在回答提问+",
+     "duration": 7234,
+     "dm_total": 34477
+    },
+    {
+     "cid": 40851933260,
+     "page": 2,
+     "part": "1-四时小路只是在回答提问+",
+     "duration": 3870,
+     "dm_total": 18444
+    }
+   ],
+   "view": 2917,
+   "danmaku": 52921,
+   "reply": 11,
+   "like": 62,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV16Agj6rE4u",
+   "dm_total": 52921,
+   "dm_per_hour": 17157.4,
+   "score": 60.8,
+   "dm_rank": 85.7
+  },
+  {
+   "bvid": "BV1JNgj6gEeS",
+   "aid": 117083325071597,
+   "title": "四时小路只是在聊天+",
+   "raw_title": "【直播回放】四时小路只是在聊天+ 2026年08月10日21点场",
+   "category": "杂谈",
+   "pubdate": 1786550416,
+   "date": "2026-08-13 00:00",
+   "duration": 5664,
+   "parts": [
+    {
+     "cid": 40851933028,
+     "page": 1,
+     "part": "四时小路只是在聊天+",
+     "duration": 5664,
+     "dm_total": 36362
+    }
+   ],
+   "view": 1519,
+   "danmaku": 36362,
+   "reply": 3,
+   "like": 37,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1JNgj6gEeS",
+   "dm_total": 36362,
+   "dm_per_hour": 23111.4,
+   "score": 63.7,
+   "dm_rank": 90.5
+  },
+  {
+   "bvid": "BV1mguR64ETy",
+   "aid": 117069064505874,
+   "title": "四时小路的音乐分享电台",
+   "raw_title": "【直播回放】四时小路的音乐分享电台 2026年08月10日07点场",
+   "category": "电台",
+   "pubdate": 1786333767,
+   "date": "2026-08-10 11:49",
+   "duration": 10045,
+   "parts": [
+    {
+     "cid": 40767195417,
+     "page": 1,
+     "part": "四时小路的音乐分享电台",
+     "duration": 10045,
+     "dm_total": 19033
+    }
+   ],
+   "view": 6785,
+   "danmaku": 19033,
+   "reply": 45,
+   "like": 186,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1mguR64ETy",
+   "dm_total": 19033,
+   "dm_per_hour": 6821.2,
+   "score": 27.2,
+   "dm_rank": 31.0
+  },
+  {
+   "bvid": "BV16RuU6AEvc",
+   "aid": 117066145336258,
+   "title": "四时小路只是在唱歌",
+   "raw_title": "【直播回放】四时小路只是在唱歌 2026年08月08日20点场",
+   "category": "唱歌",
+   "pubdate": 1786289039,
+   "date": "2026-08-09 23:23",
+   "duration": 9087,
+   "parts": [
+    {
+     "cid": 40755528179,
+     "page": 1,
+     "part": "四时小路只是在唱歌",
+     "duration": 9087,
+     "dm_total": 48490
+    }
+   ],
+   "view": 6302,
+   "danmaku": 48490,
+   "reply": 20,
+   "like": 185,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV16RuU6AEvc",
+   "dm_total": 48490,
+   "dm_per_hour": 19210.3,
+   "score": 61.3,
+   "dm_rank": 88.1
+  },
+  {
+   "bvid": "BV1xiuG6zEmj",
+   "aid": 117059518269883,
+   "title": "万字解析四时小路出道",
+   "raw_title": "【直播回放】万字解析四时小路出道 2026年08月08日11点场",
+   "category": "杂谈",
+   "pubdate": 1786187133,
+   "date": "2026-08-08 19:05",
+   "duration": 12282,
+   "parts": [
+    {
+     "cid": 40718829147,
+     "page": 1,
+     "part": "0-万字解析四时小路出道",
+     "duration": 7234,
+     "dm_total": 53811
+    },
+    {
+     "cid": 40718829051,
+     "page": 2,
+     "part": "1-万字解析四时小路出道",
+     "duration": 5048,
+     "dm_total": 37551
+    }
+   ],
+   "view": 9168,
+   "danmaku": 91362,
+   "reply": 21,
+   "like": 164,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV1xiuG6zEmj",
+   "dm_total": 91362,
+   "dm_per_hour": 26779.3,
+   "score": 63.9,
+   "dm_rank": 92.9
+  },
+  {
+   "bvid": "BV12iuG6zEt5",
+   "aid": 117059518335803,
+   "title": "嘘，你能看到我吗？",
+   "raw_title": "【直播回放】嘘，你能看到我吗？ 2026年08月07日20点场",
+   "category": "其他",
+   "pubdate": 1786186755,
+   "date": "2026-08-08 18:59",
+   "duration": 2096,
+   "parts": [
+    {
+     "cid": 40718828706,
+     "page": 1,
+     "part": "嘘，你能看到我吗？",
+     "duration": 2096,
+     "dm_total": 24143
+    }
+   ],
+   "view": 10215,
+   "danmaku": 24143,
+   "reply": 46,
+   "like": 369,
+   "cover": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg",
+   "thumb": "https://i2.hdslb.com/bfs/archive/54b863b32a1d93e18c0df400b5396b1c512b2d1b.jpg@320w_200h_1c.webp",
+   "url": "https://www.bilibili.com/video/BV12iuG6zEt5",
+   "dm_total": 24143,
+   "dm_per_hour": 41467.0,
+   "score": 68.1,
+   "dm_rank": 100.0
+  }
+ ]
+}

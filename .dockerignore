@@ -1,0 +1,13 @@
+# 构建上下文只需要 cloud/ 一个目录。
+# 项目根的 tools/ 下约有 360 MB 诊断中间产物（.frames/.audio/.boundary 等），
+# 若不加这一层排除，docker build 会把它们全部送进 daemon，构建时间和磁盘都会爆。
+#
+# 语法同 .gitignore：先全排除，再逐条放行。
+*
+!cloud/
+!cloud/**
+
+# cloud/ 内部仍需排除的东西
+**/__pycache__
+**/*.pyc
+cloud/*.png

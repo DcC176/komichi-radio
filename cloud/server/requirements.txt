@@ -1,0 +1,2 @@
+# 无第三方依赖：只用 Python 标准库（http.server / urllib / json）。
+# 这个文件存在只是为了让平台识别出这是 Python 项目。
