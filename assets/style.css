@@ -1310,6 +1310,165 @@ body.theater .chapters-panel { display: none; }
 
 .status-err { font-size: 12px; color: #ffb0b8; line-height: 1.5; }
 
+/* 出网失败提示条：连不上 B 站时图片和播放会一起失效，必须让用户看见 */
+.net-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 90, 110, .35);
+  border-radius: 10px;
+  background: rgba(255, 60, 80, .12);
+  font-size: 13px;
+  line-height: 1.6;
+  color: #ffc4ca;
+}
+.net-alert b { color: #fff; font-weight: 500; }
+.net-alert .btn.retry { margin-left: auto; flex: none; }
+
+/* ---------------- 直播间：仿 B 站布局，一屏铺满，不受影院模式影响 */
+/* 影院模式会在左右各挂一条竖栏（本场分段 / 接下来），直播间里一律不要 */
+body.view-broadcast .strip,
+body.view-broadcast .np,
+body.view-broadcast .next,
+body.view-broadcast .credits { display: none; }
+
+body.view-broadcast { overflow: hidden; }
+body.view-broadcast .views,
+body.view-broadcast.theater .views { display: contents; }   /* section 直接落进 .wrap 网格 */
+body.view-broadcast .wrap,
+body.view-broadcast.theater .wrap {
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 14px;
+  max-width: none;
+  height: calc(100vh - 57px);      /* 顶栏高度：整页不再滚动 */
+  padding: 14px 18px;
+  overflow: hidden;
+  align-items: stretch;
+}
+/* 播放器按「可用高度允许的最大 16:9」定宽，绝不超出列宽，也绝不顶破一屏 */
+body.view-broadcast .player-box,
+body.view-broadcast.theater .player-box {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+  margin: 0;
+  width: min(100%, calc((100vh - 120px) * 16 / 9));
+  aspect-ratio: 16 / 9;
+}
+body.view-broadcast #view-broadcast {
+  grid-column: 2;
+  grid-row: 1;
+  position: relative;              /* 给独轮车浮层定位 */
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+body.view-broadcast .live-chat { flex: 1 1 auto; min-height: 60px; height: auto; }
+/* flex 子项默认 min-height:auto，不显式归零的话弹幕卡不肯收缩，会把下面「发弹幕」挤出屏幕 */
+body.view-broadcast #view-broadcast > * { min-height: 0; }
+body.view-broadcast .live-chat-card {
+  flex: 1 1 auto;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+}
+.live-info { font-size: 13px; color: var(--text); line-height: 1.7; margin-bottom: 10px; }
+.live-info b { color: var(--red); font-weight: 600; }
+.live-qn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.live-qn select {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+.live-chat {
+  flex: 1 1 auto;
+  min-height: 60px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .03);
+  padding: 8px 10px;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.chat-line { margin: 3px 0; word-break: break-all; color: var(--text); }
+.chat-uname { margin-right: 6px; }
+.chat-sys { color: var(--muted-2); }
+
+/* 独轮车：平时收起的浮层，由「独轮车」按钮开合 */
+.live-wheel-btn { float: right; margin-top: -4px; }
+.live-wheel-pop {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  z-index: 30;
+  filter: drop-shadow(0 12px 28px rgba(0, 0, 0, .55));
+}
+.live-wheel-pop .live-card { background: var(--panel-2); }
+.live-wheel-note { font-size: 11px; font-weight: 400; color: var(--muted-2); margin-left: 6px; }
+.live-side { display: flex; flex-direction: column; gap: 14px; }
+.live-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+}
+.live-card-h { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
+.live-note { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 0 0 10px; }
+.live-note b { color: var(--text); font-weight: 500; }
+.live-cred { display: flex; gap: 8px; margin-bottom: 10px; }
+.live-send { display: flex; gap: 8px; margin-bottom: 8px; }
+.live-card input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color .15s;
+}
+.live-card input::placeholder { color: var(--muted-2); }
+.live-card input:focus { border-color: rgba(255, 59, 78, .55); }
+.live-wheel-opts input { flex: none; width: 64px; }
+.live-wheel-opts {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+  align-items: center;
+}
+.live-result {
+  font-size: 12px;
+  color: var(--muted-2);
+  line-height: 1.6;
+  min-height: 18px;
+  word-break: break-all;
+}
+/* .qp-btns .btn 的 inline-flex 会盖过 hidden 属性，这里必须显式压回去 */
+.live-card .btn[hidden],
+.live-card [hidden] { display: none; }
+
 .status-panel-f {
   padding: 9px 14px;
   border-top: 1px solid var(--line);
@@ -1330,3 +1489,84 @@ body.theater .chapters-panel { display: none; }
   .status-fab { padding: 0 12px; }
   .status-panel { width: calc(100vw - 24px); }
 }
+
+/* ---------------- 设置页：快捷键绑定（默认全部留空，用户自己按） */
+.key-list { display: flex; flex-direction: column; }
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.key-row:last-child { border-bottom: 0; }
+.key-name { flex: 1; min-width: 0; font-size: 13px; color: var(--text); }
+.key-scope { font-size: 11px; color: var(--muted-2); margin-left: 8px; }
+.key-combo {
+  flex: none;
+  min-width: 168px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line-2);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color .15s, color .15s;
+}
+.key-combo:hover { border-color: rgba(255, 59, 78, .45); color: var(--text); }
+.key-combo.set { color: var(--text); border-color: rgba(255, 255, 255, .24); }
+.key-combo.recording { color: #fff; border-color: var(--red); background: rgba(255, 59, 78, .18); }
+.key-del {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted-2);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.key-del:hover { color: #fff; border-color: var(--line-2); }
+.key-del[hidden] { display: none; }
+@media (max-width: 560px) {
+  .key-row { flex-wrap: wrap; }
+  .key-combo { flex: 1 1 auto; }
+}
+
+.seg-auto {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+.seg-auto input { accent-color: var(--red); width: 15px; height: 15px; }
+#seg-state { white-space: pre-line; }
+
+/* 直播间只放直播：回放的节目名与「分段 / 标注 / 画质」按钮在这里没有意义
+   （「登录」要留着 —— 弹幕凭据靠它拿） */
+body.view-broadcast .pv-title,
+body.view-broadcast #btn-chapters,
+body.view-broadcast #btn-mark,
+body.view-broadcast #btn-quality { display: none; }
+
+/* 从浏览器一键启动：可拖进书签栏的协议链接 */
+.proto-row { margin: 0 0 12px; }
+.proto-link {
+  display: inline-block;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px dashed rgba(255, 59, 78, .55);
+  background: rgba(255, 59, 78, .10);
+  color: var(--text);
+  font-size: 13px;
+  text-decoration: none;
+  cursor: grab;
+}
+.proto-link:hover { border-style: solid; background: rgba(255, 59, 78, .18); }

@@ -1,0 +1,25 @@
+FFmpeg —— 自动分段的音频解码工具
+====================================================================
+
+本程序（二十四时小路电台）在「自动分段」功能里会调用 FFmpeg 把回放的音频解码成
+PCM 波形以便分析。FFmpeg 以**独立可执行文件**的形式随程序一起分发，通过子进程调用，
+不与本程序的代码链接，也不修改 FFmpeg 本身。
+
+来源
+    https://ffmpeg.org/            （项目主页）
+    https://www.gyan.dev/ffmpeg/   （本次分发的 Windows 构建来源）
+    构建：ffmpeg 7.1 essentials_build（静态链接，configure 含 --enable-gpl --enable-version3）
+
+许可
+    FFmpeg 主体：LGPL v2.1 或更高版本。
+    本构建启用了 --enable-gpl，因此整体按 GNU GPL v3（或更高）分发。
+
+    GNU GPL v3 全文：https://www.gnu.org/licenses/gpl-3.0.html
+    对应源码：https://ffmpeg.org/download.html （以及 gyan.dev 构建页面上给出的构建脚本）
+
+    GPL 要求分发者提供对应源码。FFmpeg 官方源码可从上方链接获取；
+    本程序不分发任何修改过的 FFmpeg 代码，使用的即是官方发布的构建。
+
+如果你要移除这一依赖
+    删除本文件与同目录下的 ffmpeg 可执行文件即可 —— 程序会自动退化为
+    「未找到 ffmpeg，自动分段不可用」，其余功能不受影响。

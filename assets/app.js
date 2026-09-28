@@ -16,7 +16,7 @@
   // 歌曲类场次：画面没读到文字时，按段长估算「约 N 首」才有意义；
   // 游戏/杂谈/联动 没有歌，只能按「第 N 段」定位。
   var MUSIC_CATS = { '唱歌': 1, '电台': 1 };
-  var VIEWS = ['live', 'schedule', 'categories', 'about'];
+  var VIEWS = ['live', 'broadcast', 'schedule', 'categories', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
 
   var store = {
@@ -216,14 +216,20 @@
     return segs.length - 1;
   }
 
-  function rebuildCycle() {
+  function rebuildCycle(soft) {
     var pool = state.all.filter(function (p) {
       return !Object.keys(state.cats).length || state.cats[p.category];
     });
     state.cycle = buildCycle(pool);
+    // soft：只是后台抓到新清单后换一份，播放中的那一段不能被打断
+    // （drift / segIndex / playingKey 保持原样，tick 会自己判断要不要换段）
+    if (soft) return;
     state.drift = 0;
     state.segIndex = -1;
     state.playingKey = null;
+    // 直播间页正占着播放器放直播流，回放不能来抢（boot 完成时的这次调用尤其关键，
+    // 否则刚接上去的直播流会被回放覆盖）。离开时 resumeReplay() 会重新拉起回放。
+    if (state.view === 'broadcast') return;
     if (state.cycle.total > 0) applyPlayer(true);
     else renderIdle();
   }
@@ -257,6 +263,7 @@
         if (d.error) {
           state.loading = false;
           el.npMeta.textContent = '播放地址获取失败：' + d.error;
+          netFail();
           return;
         }
         state.qn = d.quality;                          // B 站实际下发的清晰度
@@ -297,6 +304,7 @@
       .catch(function (e) {
         state.loading = false;
         el.npMeta.textContent = '取播放地址出错：' + e.message;
+        netFail();
       });
   }
 
@@ -310,6 +318,21 @@
   }
 
   // 播放：优先 DASH（1080P 只存在于 DASH 通道），失败再退回 MP4。
+  var prefetched = {};
+
+  // 提前把下一段的 MPD 拉热（服务端会缓存）：切段时省掉一次 B站往返（实测约 140ms）。
+  // 只预热「下一段」——当前段正在被 dash.js 取，重复请求反而多走一趟 B站。
+  function prefetchSegment(seg) {
+    if (!seg || typeof dashjs === 'undefined' || state.offline) return;
+    var key = seg.bvid + '#' + seg.page + '#' + state.qn;
+    if (prefetched[key]) return;
+    prefetched[key] = 1;
+    fetch('/api/dash?bvid=' + encodeURIComponent(seg.bvid) + '&cid=' + seg.cid
+          + '&qn=' + state.qn).catch(function () { /* 预取出错无所谓 */ });
+    fetch('/api/dashinfo?bvid=' + encodeURIComponent(seg.bvid) + '&cid=' + seg.cid)
+      .catch(function () { /* 同上 */ });
+  }
+
   function loadMedia(seg, seekTo, anchor) {
     if (state.offline) return;
     var key = seg.bvid + '#' + seg.page + '#' + state.qn;
@@ -375,6 +398,12 @@
   }
 
   function applyPlayer(force) {
+    // 直播间页只放实时直播：回放引擎在此时一律不许碰播放器。
+    // 这里是唯一的咽喉 —— 扫码登录成功、切回标签页（visibilitychange）、
+    // 播放出错后的重试定时器、退出登录、点列表换歌，都会绕到这儿来，
+    // 不在这里拦，直播间就会被换成回放画面。离开直播间时 resumeReplay()
+    // 是在 state.view 已经切走之后调用的，所以正常恢复不受影响。
+    if (state.view === 'broadcast') return;
     if (!state.cycle || !state.cycle.segments.length) return;
 
     var pos = cyclePos();
@@ -455,6 +484,20 @@
 
   // 缩略图一律经本机代理取：部分网络下浏览器直连 i2.hdslb.com 会失败。
   // 尺寸用更小的变体，配合 srcset 让浏览器按设备像素比自选。
+  // 取图失败要看得见：出网不通时缩略图和视频会同时失效，光靠「空白图 + 点不动」无从判断。
+  // 个别地址失效是常事，累计到 3 次才提示，避免误报。
+  var netFails = 0;
+
+  function netFail() {
+    netFails++;
+    if (!el.netAlert || netFails < 3 || !el.netAlert.hidden) return;
+    el.netAlert.hidden = false;
+    el.netAlert.innerHTML = '<div><b>连不上 B 站</b>：缩略图与视频都取不到。'
+      + '最常见的原因是本机开了系统代理、但代理程序没运行 —— 关掉代理后重试。</div>'
+      + '<button class="btn ghost retry" id="net-retry">重新载入</button>';
+    document.getElementById('net-retry').onclick = function () { location.reload(); };
+  }
+
   function thumbSrc(p, size) {
     // size 是完整后缀（如 '240w_150h_1c.webp'），与主列表调用约定一致
     return '/api/img?u=' + b64url(p.thumb.replace('@320w_200h_1c.webp', '@' + size));
@@ -730,12 +773,558 @@
     ].join('');
   }
 
+  /* ---------------------------------------------------------- 直播间 */
+
+  var LIVE_ROOM = '1700301235';   // 与服务端 ROOM_ID 一致
+  var liveInit = false;
+  var wheelTimer = null;
+  var liveBusy = false;
+
+  function postJSON(url, obj) {
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj || {})
+    }).then(function (r) { return r.json(); });
+  }
+
+  var livePlayer = null;
+  var liveRetry = null;
+
+  function destroyLive() {
+    if (liveRetry) { clearTimeout(liveRetry); liveRetry = null; }
+    if (livePlayer) {
+      try { livePlayer.pause(); livePlayer.unload(); livePlayer.detachMediaElement(); }
+      catch (e) { /* 播放器可能已经处于异常态，忽略 */ }
+      livePlayer = null;
+    }
+    try { el.player.removeAttribute('src'); el.player.load(); } catch (e) { /* 同上 */ }
+  }
+
+  // 直播流是 HTTP-FLV，浏览器原生播不了，用 mpegts.js 接到本站同一个 <video> 上
+  function startLive(qn) {
+    if (typeof mpegts === 'undefined') {
+      el.liveInfo.textContent = '播放库没加载（assets/mpegts.js 缺失），无法播放直播流';
+      return;
+    }
+    destroyDash();
+    destroyLive();
+    livePlayer = mpegts.createPlayer({
+      type: 'flv', isLive: true, url: '/api/live/stream?qn=' + (qn || 250),
+      // 关掉 stash 缓冲：默认值会先攒一段再喂给 <video>，实测进直播间要多等约 1 秒。
+      // 直播不需要「起播顺滑」，要的是尽快看到画面（网络抖动导致的卡顿由下面的重连兜底）。
+      enableStashBuffer: false,
+      liveBufferLatencyChasing: true      // 落后直播边缘时自动追帧
+    });
+    livePlayer.attachMediaElement(el.player);
+    livePlayer.load();
+    // 直播断了就清掉画面并说明，宁可显示一句话，也不要留一帧冻住的画面
+    // （更不能让回放趁机接管 —— 上面 applyPlayer 的直播守卫已拦住那条路）
+    livePlayer.on(mpegts.Events.ERROR, function () {
+      if (state.view !== 'broadcast') return;
+      liveOffline('直播连接中断，正在尝试重连…');
+      liveRetry = setTimeout(function () {
+        liveRetry = null;
+        if (state.view === 'broadcast') loadLiveInfo();
+      }, 8000);
+    });
+    el.player.muted = state.muted;
+    try { livePlayer.play(); } catch (e) { /* 浏览器可能要求用户手势 */ }
+  }
+
+  function renderBroadcast() {
+    if (!liveInit) {
+      liveInit = true;
+      bindLive();
+      el.liveQn.addEventListener('change', function () {
+        startLive(parseInt(el.liveQn.value, 10));
+      });
+    }
+    // 先把回放彻底摘掉：留着 src 会停在回放的最后一帧上，看起来就像「直播间在放回放」
+    destroyDash();
+    destroyLive();
+    el.banner.hidden = true;
+    loadLiveInfo();
+    refreshLiveCred();
+    pollWheel();
+    if (!wheelTimer) wheelTimer = setInterval(pollWheel, 1000);
+  }
+
+  // 直播没开 / 断了：把画面清空并说明原因，不要留一帧静止画面让人误会
+  function liveOffline(text) {
+    destroyLive();
+    el.banner.innerHTML = '<div>' + esc(text) + '</div>';
+    el.banner.hidden = false;
+  }
+
+  function loadLiveInfo() {
+    fetch('/api/live/playinfo').then(function (r) { return r.json(); }).then(function (d) {
+      var qnList = d.qualities || [];
+      el.liveQn.innerHTML = qnList.map(function (q) {
+        return '<option value="' + q.qn + '"' + (q.qn === d.current_qn ? ' selected' : '')
+          + '>' + esc(q.desc) + '</option>';
+      }).join('');
+      el.liveQnBox.hidden = !qnList.length;
+      if (!d.living) {
+        el.liveInfo.innerHTML = '<b>未开播</b>';
+        chatStop();
+        liveOffline('小路现在没开播，这里只会显示直播画面。');
+        return;
+      }
+      el.liveInfo.innerHTML = '<b>直播中</b> · ' + esc(d.title || '（无标题）')
+        + (d.online ? ' · 人气 ' + fmtNum(d.online) : '');
+      el.banner.hidden = true;
+      startLive(d.current_qn);
+      chatStart();
+    }).catch(function () {
+      el.liveInfo.textContent = '直播状态获取失败（本机服务没起？）';
+    });
+  }
+
+  // 离开直播间页：把播放器还给回放频道，走的是「回到直播」按钮同一条路径
+  function resumeReplay() {
+    destroyLive();
+    el.banner.hidden = true;
+    state.drift = 0;
+    state.mediaBase = null;
+    applyPlayer(true);
+  }
+
+  function bindLive() {
+    // 独轮车平时收着，点按钮才展开（浮层）；收起时按钮上会显示运行进度
+    function showWheel(on) { el.wheelPop.hidden = !on; }
+    el.wheelToggle.addEventListener('click', function () { showWheel(el.wheelPop.hidden); });
+    el.wheelClose.addEventListener('click', function () { showWheel(false); });
+
+    el.liveJctSave.addEventListener('click', function () {
+      if (liveBusy) return;
+      var v = el.liveJct.value.trim();
+      if (!v) { el.liveCredState.textContent = 'bili_jct 不能为空'; return; }
+      liveBusy = true;
+      postJSON('/api/live/credential', { jct: v })
+        .then(function (d) {
+          if (d.error) { el.liveCredState.textContent = d.error; return; }
+          el.liveJct.value = '';
+          refreshLiveCred();
+        })
+        .catch(function () { el.liveCredState.textContent = '保存失败，请重试'; })
+        .then(function () { liveBusy = false; });
+    });
+
+    function sendOnce() {
+      if (liveBusy) return;
+      var msg = el.liveMsg.value.trim();
+      if (!msg) { el.liveResult.textContent = '先输入弹幕内容'; return; }
+      liveBusy = true;
+      el.liveSend.disabled = true;
+      postJSON('/api/live/send', { msg: msg })
+        .then(function (d) {
+          el.liveResult.textContent = d.error ? d.error
+            : (d.code === 0 ? '已发送 ✓' : 'B 站返回：' + (d.message || d.code));
+        })
+        .catch(function () { el.liveResult.textContent = '发送失败，请重试'; })
+        .then(function () { liveBusy = false; el.liveSend.disabled = false; });
+    }
+    el.liveSend.addEventListener('click', sendOnce);
+    el.liveMsg.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') sendOnce();
+    });
+
+    el.wheelStart.addEventListener('click', function () {      if (liveBusy) return;
+      var msg = el.wheelMsg.value.trim();
+      if (!msg) { el.wheelState.textContent = '先输入要循环的弹幕'; return; }
+      liveBusy = true;
+      postJSON('/api/live/wheel/start', {
+        msg: msg,
+        interval: parseFloat(el.wheelInterval.value) || 3,
+        count: parseInt(el.wheelCount.value, 10) || 20
+      }).then(function (d) {
+        if (d.error) el.wheelState.textContent = d.error;
+        else el.wheelState.textContent = '已启动：每 ' + d.interval + ' 秒发 1 条，共 ' + d.count + ' 条';
+        pollWheel();
+      }).catch(function () { el.wheelState.textContent = '启动失败，请重试'; })
+        .then(function () { liveBusy = false; });
+    });
+    el.wheelStop.addEventListener('click', function () {
+      postJSON('/api/live/wheel/stop').then(pollWheel);
+    });
+  }
+
+  function refreshLiveCred() {
+    fetch('/api/status').then(function (r) { return r.json(); }).then(function (d) {
+      var name = d.uname || '已登录';
+      if (d.logged && d.jct) {
+        el.liveCredState.innerHTML = '已登录（' + esc(name) + '），弹幕可以直接发。';
+        el.liveCredBox.hidden = true;
+      } else {
+        el.liveCredBox.hidden = false;
+        el.liveCredState.innerHTML = d.logged
+          ? '发弹幕还需要 <b>bili_jct</b>。<b>重新扫码登录一次就会自动带上</b>'
+            + '（B 站登录时返回的 Cookie 里就有它）；也可以手工粘贴：'
+            + 'F12 → Application → Cookies → bilibili.com。只存在本机，不会外传。'
+          : '还没有登录：去播放器右上角扫码登录，成功后会自动同时取得 SESSDATA 与 bili_jct。';
+      }
+    }).catch(function () {
+      el.liveCredState.textContent = '登录状态获取失败';
+    });
+  }
+
+  function pollWheel() {
+    fetch('/api/live/wheel').then(function (r) { return r.json(); }).then(function (d) {
+      el.wheelStart.hidden = d.running;
+      el.wheelStop.hidden = !d.running;
+      el.wheelToggle.textContent = d.running
+        ? '独轮车 · ' + d.sent + '/' + d.total : '独轮车';
+      el.wheelToggle.classList.toggle('primary', !!d.running);
+      if (!d.running) {
+        if (d.reason) {
+          el.wheelState.textContent = d.reason;
+          // 浮层收着的时候，自动停止这类结果必须留在按钮上，否则用户看不到
+          if (el.wheelPop.hidden)
+            el.wheelToggle.textContent = '独轮车 · '
+              + (d.reason.indexOf('已发完') === 0 ? '已完成' : '已停止');
+        }
+        if (d.last_code != null && d.last_code !== 0)
+          el.wheelState.textContent = '上次发送失败：' + (d.last_message || d.last_code);
+        return;
+      }
+      var last = d.last_code == null ? '还没发第一条'
+        : (d.last_code === 0 ? '最近一条成功 ✓' : '最近一条失败：' + (d.last_message || d.last_code));
+      el.wheelState.textContent = '运行中：已发 ' + d.sent + ' / ' + d.total
+        + ' 条（每 ' + d.interval + ' 秒 1 条）· ' + last;
+    }).catch(function () { /* 服务没起时静默，不打扰 */ });
+  }
+
+  /* ---------------------------------------------------------- 实时弹幕（SSE） */
+  // 浏览器不能直连 B 站弹幕网关：握手带不上 bilibili 域的 Cookie，实测认证后立刻被
+  // 断开（close 1006）。所以由本机服务端维持那条 WebSocket，页面用 SSE 订阅结果。
+
+  var chatEs = null;
+
+  function chatSys(text) {
+    chatLine(null, null, text, true);
+  }
+
+  function chatLine(uid, uname, text, sys) {
+    var box = el.liveChat;
+    if (!box) return;
+    var div = document.createElement('div');
+    div.className = 'chat-line' + (sys ? ' chat-sys' : '');
+    if (!sys && uname) {
+      var u = document.createElement('span');
+      u.className = 'chat-uname';
+      u.style.color = 'hsl(' + ((uid || 0) % 360) + ',70%,72%)';
+      u.textContent = uname + '：';
+      div.appendChild(u);
+    }
+    div.appendChild(document.createTextNode(text));
+    var stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+    box.appendChild(div);
+    while (box.children.length > 80) box.removeChild(box.firstChild);
+    if (stick) box.scrollTop = box.scrollHeight;
+  }
+
+  function chatStart() {
+    if (chatEs) return;
+    el.liveChatState.textContent = '连接中…';
+    chatEs = new EventSource('/api/live/chat/stream');
+    chatEs.onopen = function () { el.liveChatState.textContent = '已连接 · 实时弹幕中'; };
+    chatEs.onmessage = function (ev) {
+      var j;
+      try { j = JSON.parse(ev.data); } catch (e) { return; }
+      if (j.type === 'danmaku') chatLine(j.uid, j.uname, j.text);
+      else if (j.type === 'popularity')
+        el.liveChatState.textContent = '已连接 · 人气 ' + fmtNum(j.value);
+      else if (j.type === 'state') chatSys(j.text);
+    };
+    // EventSource 自己会重连，这里只更新提示
+    chatEs.onerror = function () { el.liveChatState.textContent = '已断开，重连中…'; };
+  }
+
+  function chatStop() {
+    if (chatEs) { chatEs.close(); chatEs = null; }
+    if (el.liveChat) {
+      el.liveChat.innerHTML = '<div class="chat-line chat-sys">未连接</div>';
+      el.liveChatState.textContent = '';
+    }
+  }
+
+  /* ---------------------------------------------------------- 设置：快捷键 */
+  // 按需求「不设置基础默认快捷键」：初始全为空，必须用户自己按一遍来绑定。
+  // 绑定存 localStorage，**全局生效** —— 任意视图、焦点在页面任何位置都能用。
+
+  var KEY_STORE = 'xl_keys';
+  var keyMap = store.get(KEY_STORE) || {};
+  var recording = null;                 // 正在录制的动作 id
+  var keysBound = false;
+
+  var KEY_ACTIONS = [
+    { id: 'playPause', name: '播放 / 暂停', run: function () { clickSel('#ctrl-play'); } },
+    { id: 'muteToggle', name: '静音 / 取消静音', run: function () { clickSel('#ctrl-mute'); } },
+    { id: 'volUp', name: '音量增大', run: function () { bumpVolume(0.1); } },
+    { id: 'volDown', name: '音量减小', run: function () { bumpVolume(-0.1); } },
+    { id: 'seekBack', name: '快退 10 秒', scope: '仅回放', run: function () { seekBy(-10); } },
+    { id: 'seekFwd', name: '快进 10 秒', scope: '仅回放', run: function () { seekBy(10); } },
+    { id: 'theater', name: '宽屏模式切换', run: function () { clickSel('#btn-theater'); } },
+    { id: 'fullscreen', name: '全屏切换', run: function () { clickSel('#ctrl-fs'); } },
+    { id: 'random', name: '随机换一场', run: function () { clickSel('#btn-random'); } },
+    { id: 'gotoLive', name: '切到 24 小时频道', run: function () { location.hash = '#/live'; } },
+    { id: 'gotoBroadcast', name: '切到直播间', run: function () { location.hash = '#/broadcast'; } }
+  ];
+
+  function clickSel(sel) {
+    var e = document.querySelector(sel);
+    if (e) e.click();
+  }
+
+  function bumpVolume(d) {
+    var v = Math.min(1, Math.max(0, (parseFloat(el.ctrlVol.value) || 0) + d));
+    el.ctrlVol.value = v;
+    el.ctrlVol.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function seekBy(d) {
+    if (state.view === 'broadcast') return;       // 直播没有进度可拖
+    if (!el.player || !isFinite(el.player.duration)) return;
+    el.player.currentTime = Math.min(el.player.duration,
+                                     Math.max(0, el.player.currentTime + d));
+  }
+
+  // 用 e.code（物理键位）而不是 e.key：切换输入法 / 大小写也不会变
+  function comboOf(ev) {
+    var k = ev.code || '';
+    if (!k || /^(Control|Alt|Shift|Meta)(Left|Right)?$/.test(k)) return null;   // 只按了修饰键
+    var s = '';
+    if (ev.ctrlKey) s += 'Ctrl+';
+    if (ev.altKey) s += 'Alt+';
+    if (ev.shiftKey) s += 'Shift+';
+    if (ev.metaKey) s += 'Meta+';
+    return s + k;
+  }
+
+  var KEY_NAMES = { Space: '空格', ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑',
+    ArrowDown: '↓', Enter: '回车', Escape: 'Esc', Backspace: '退格', Delete: 'Del',
+    Tab: 'Tab', Home: 'Home', End: 'End', PageUp: 'PgUp', PageDown: 'PgDn',
+    Minus: '-', Equal: '=', Comma: ',', Period: '.', Slash: '/', Semicolon: ';',
+    Quote: "'", Backquote: '`', BracketLeft: '[', BracketRight: ']', Backslash: '\\' };
+
+  function comboLabel(c) {
+    if (!c) return '未设置';
+    return c.split('+').map(function (p) {
+      if (/^Key[A-Z]$/.test(p)) return p.slice(3);
+      if (/^Digit\d$/.test(p)) return p.slice(5);
+      if (/^Numpad/.test(p)) return '小键盘' + p.slice(6);
+      return KEY_NAMES[p] || p;
+    }).join(' + ');
+  }
+
+  function actionName(id) {
+    for (var i = 0; i < KEY_ACTIONS.length; i++)
+      if (KEY_ACTIONS[i].id === id) return KEY_ACTIONS[i].name;
+    return id;
+  }
+
+  function saveKeys() { store.set(KEY_STORE, keyMap); }
+
+  function bindSettings() {
+    if (keysBound) return;
+    keysBound = true;
+
+    // 自动分段：开关 + 手动给最新一期排队，状态轮询在 renderSettings 里起
+    el.segAuto.addEventListener('change', function () {
+      postJSON('/api/segments/auto', { on: el.segAuto.checked }).then(segPoll);
+    });
+
+    el.segRun.addEventListener('click', function () {
+      var p = state.all && state.all[0];
+      if (!p) { el.segState.textContent = '节目单还没载入'; return; }
+      postJSON('/api/segments/run', { bvid: p.bvid }).then(function (d) {
+        el.segState.textContent = d.error ? d.error : ('已排队：' + p.title);
+        segPoll();
+      });
+    });
+
+    // 自定义协议：注册后书签 komichi://open 就能拉起本程序
+    el.protoReg.addEventListener('click', function () {
+      postJSON('/api/protocol/register', {}).then(function (d) {
+        el.protoState.textContent = d.error ? d.error : '已注册，现在可以把书签拖进书签栏了。';
+        protoPoll();
+      });
+    });
+    el.protoUnreg.addEventListener('click', function () {
+      postJSON('/api/protocol/unregister', {}).then(function (d) {
+        el.protoState.textContent = d.error ? d.error : '已取消注册（书签不再能启动程序）。';
+        protoPoll();
+      });
+    });
+
+    el.keysList.addEventListener('click', function (e) {
+      var del = e.target.closest('[data-key-del]');
+      if (del) {
+        delete keyMap[del.getAttribute('data-key-del')];
+        saveKeys(); renderSettings();
+        el.keysTip.textContent = '已清除该快捷键。';
+        return;
+      }
+      var btn = e.target.closest('[data-key-btn]');
+      if (btn) startRecord(btn.getAttribute('data-key-btn'), btn);
+    });
+    el.keysReset.addEventListener('click', function () {
+      if (!Object.keys(keyMap).length) {
+        el.keysTip.textContent = '现在还没有绑定任何快捷键。'; return;
+      }
+      keyMap = {}; saveKeys(); renderSettings();
+      el.keysTip.textContent = '已全部清除。';
+    });
+
+    // 全局捕获：任意视图、任意焦点都能触发；录制态优先处理
+    document.addEventListener('keydown', function (ev) {
+      if (recording) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.key === 'Escape') {
+          recording = null; renderSettings();
+          el.keysTip.textContent = '已取消。';
+          return;
+        }
+        var combo = comboOf(ev);
+        if (!combo) return;                        // 还在按修饰键，继续等
+        var name = actionName(recording);
+        Object.keys(keyMap).forEach(function (k) {  // 同一个组合只能属于一个动作
+          if (keyMap[k] === combo && k !== recording) delete keyMap[k];
+        });
+        keyMap[recording] = combo;
+        saveKeys();
+        recording = null;
+        renderSettings();
+        el.keysTip.textContent = '已绑定：' + name + ' → ' + comboLabel(combo) + '。';
+        return;
+      }
+
+      var hit = comboOf(ev);
+      if (!hit) return;
+      // 在输入框里打字时不劫持裸按键；带 Ctrl/Alt/Meta 的组合仍然全局生效
+      var t = ev.target;
+      var typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+                         || t.tagName === 'SELECT' || t.isContentEditable);
+      if (typing && !(ev.ctrlKey || ev.altKey || ev.metaKey)) return;
+      for (var i = 0; i < KEY_ACTIONS.length; i++) {
+        if (keyMap[KEY_ACTIONS[i].id] === hit) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          KEY_ACTIONS[i].run();
+          return;
+        }
+      }
+    }, true);
+  }
+
+  function startRecord(id, btn) {
+    recording = id;
+    Array.prototype.forEach.call(el.keysList.querySelectorAll('.key-combo'), function (b) {
+      b.classList.remove('recording');
+      b.textContent = comboLabel(keyMap[b.getAttribute('data-key-btn')]);
+    });
+    btn.classList.add('recording');
+    btn.textContent = '按下按键…（Esc 取消）';
+    el.keysTip.textContent = '正在录制「' + actionName(id) + '」，请按下要用的组合键。';
+  }
+
+  function renderSettings() {
+    bindSettings();
+    el.keysList.innerHTML = KEY_ACTIONS.map(function (a) {
+      var c = keyMap[a.id];
+      return '<div class="key-row">'
+        + '<span class="key-name">' + esc(a.name)
+        + (a.scope ? '<span class="key-scope">' + esc(a.scope) + '</span>' : '')
+        + '</span>'
+        + '<button class="key-combo' + (c ? ' set' : '') + '" type="button"'
+        + ' data-key-btn="' + a.id + '">' + esc(comboLabel(c)) + '</button>'
+        + '<button class="key-del" type="button" title="清除"'
+        + ' data-key-del="' + a.id + '"' + (c ? '' : ' hidden') + '>×</button>'
+        + '</div>';
+    }).join('');
+    segPoll();
+    protoPoll();
+    if (!segTimer) segTimer = setInterval(segPoll, 4000);
+  }
+
+  function protoPoll() {
+    fetch('/api/protocol').then(function (r) { return r.json(); }).then(function (d) {
+      el.protoLink.setAttribute('href', d.url);
+      el.protoLink.textContent = '▶ 启动小路电台（' + d.url + '）';
+      var s;
+      if (!d.supported) {
+        s = '源码运行模式：不需要注册（注册的目标得是本程序的 EXE）。';
+      } else if (d.registered) {
+        s = '已注册 ✓ 书签可以直接启动本程序。\n'
+          + '如果还没加书签：把上面那个链接拖到书签栏即可。';
+      } else {
+        s = '未注册 —— 先点「注册 / 修复」，书签才能启动程序。\n'
+          + '（只写 HKEY_CURRENT_USER，不需要管理员权限）';
+      }
+      el.protoState.textContent = s;
+    }).catch(function () { /* 服务未起时静默 */ });
+  }
+
+  var segTimer = null;
+
+  function segPoll() {
+    fetch('/api/segments/status').then(function (r) { return r.json(); }).then(function (d) {
+      el.segAuto.checked = !!d.auto;
+      var cov = d.coverage || {};
+      var line = 'ffmpeg：' + (d.ffmpeg ? '已找到' : '未找到（分段需要 ffmpeg）')
+        + ' · 边界精修：' + (d.refine ? '可用' : '不可用（缺 numpy/pillow，只用音频分析）')
+        + ' · 已有分段 ' + (cov.have || 0) + ' / ' + (cov.total || 0) + ' 个分P';
+      if (d.running) line += ' · 正在处理 ' + (d.current || '');
+      else if ((d.queue || []).length) line += ' · 排队 ' + d.queue.length + ' 个';
+      el.segNote.textContent = line;
+
+      var out = [];
+      if (d.error) out.push('错误：' + d.error);
+      if ((d.log || []).length) out.push(d.log.slice(-3).join(' '));
+      var last = (d.done || [])[(d.done || []).length - 1];
+      if (last) {
+        out.push(last.ok
+          ? ('上一次：' + (last.title || last.bvid) + '，新算 ' + last.processed
+             + ' 个分P（跳过 ' + last.skipped + '），共 ' + last.segments
+             + ' 个分P有分段 · 刷新页面即可看到')
+          : ('上一次失败：' + (last.error || '')));
+      }
+      el.segState.textContent = out.join('\n');
+    }).catch(function () { /* 服务未起时静默 */ });
+  }
+
+  /* ---------------------------------------------------------- 页面存活上报 */
+  // 网页全关掉时把后台服务一起关掉：关闭/跳转用 sendBeacon 说一声（刷新会在宽限期内
+  // 重新连上；bfcache 恢复不算关闭），心跳则兜住「浏览器崩溃、beacon 发不出去」的情况。
+
+  var pageId = 'p' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+  function pageAlive() {
+    fetch('/api/page/alive?cid=' + encodeURIComponent(pageId)).catch(function () {});
+  }
+
+  function pageSetup() {
+    pageAlive();
+    setInterval(pageAlive, 20000);
+    window.addEventListener('pagehide', function (ev) {
+      if (ev.persisted) return;                 // 进 bfcache：不是关闭，回来还要用
+      try {
+        navigator.sendBeacon('/api/page/bye',
+          new Blob([JSON.stringify({ cid: pageId })], { type: 'application/json' }));
+      } catch (e) { /* 没有 sendBeacon 的老浏览器：交给心跳兜底 */ }
+    });
+  }
+
   /* ---------------------------------------------------------- 视图路由 */
 
   function setView(name) {
     if (VIEWS.indexOf(name) < 0) name = 'live';
+    var prev = state.view;
     state.view = name;
     document.body.classList.toggle('view-other', name !== 'live');
+    document.body.classList.toggle('view-broadcast', name === 'broadcast');
     document.querySelectorAll('.tab').forEach(function (t) {
       t.classList.toggle('active', t.getAttribute('data-view') === name);
     });
@@ -745,9 +1334,24 @@
     });
 
     if (name === 'live') renderList();
+    else if (name === 'broadcast') renderBroadcast();
     else if (name === 'schedule') renderSchedule();
     else if (name === 'categories') renderCategories();
     else if (name === 'about') renderAbout();
+    else if (name === 'settings') renderSettings();
+
+    if (name !== 'broadcast') {
+      if (prev === 'broadcast') resumeReplay();
+      chatStop();
+      if (wheelTimer) {                              // 离开直播间页就停止轮询
+        clearInterval(wheelTimer);
+        wheelTimer = null;
+      }
+    }
+    if (name !== 'settings' && segTimer) {
+      clearInterval(segTimer);
+      segTimer = null;
+    }
   }
 
   function route() {
@@ -1365,10 +1969,13 @@
             if (s.error) { el.loginStatus.textContent = s.error; return; }
             if (s.code === 0) {
               clearInterval(qrTimer); qrTimer = null;
-              el.loginStatus.textContent = '登录成功，正在按新清晰度重新加载…';
+              el.loginStatus.textContent = s.jct === false
+                ? '登录成功，但没取到 bili_jct（发弹幕要用），再扫一次通常就有了'
+                : '登录成功，正在按新清晰度重新加载…';
               setTimeout(function () {
                 loginClose();
                 refreshStatus();
+                refreshLiveCred();     // 弹幕凭据随登录一起到手，立刻反映到直播间页
                 state.mediaBase = null;
                 applyPlayer(true);
               }, 800);
@@ -1482,7 +2089,9 @@
     // error 不冒泡，用捕获阶段统一处理；取不到图就隐藏，避免整排裂图
     ['rows', 'catRows'].forEach(function (key) {
       el[key].addEventListener('error', function (e) {
-        if (e.target && e.target.tagName === 'IMG') e.target.style.display = 'none';
+        if (!e.target || e.target.tagName !== 'IMG') return;
+        e.target.style.display = 'none';
+        if (String(e.target.src || '').indexOf('/api/img') >= 0) netFail();
       }, true);
     });
 
@@ -1776,10 +2385,17 @@
 
   function tick() {
     if (!state.cycle || !state.cycle.segments.length) return;
+    if (state.view === 'broadcast') return;   // 直播流占着播放器，回放的换段逻辑别来抢
     if (state.loading) return;              // 取流/定位期间不做换段判断
     var pos = cyclePos();
     var i = findSeg(pos);
     if (i !== state.segIndex) {
+      if (state.cycleStale) {
+        // 后台抓到的新清单等到这里才生效：反正马上要换段，顺手把循环重建了
+        state.cycleStale = false;
+        rebuildCycle();
+        return;
+      }
       state.segIndex = i;
       state.playingKey = null;
       applyPlayer(true);
@@ -1789,6 +2405,10 @@
     }
     var seg = state.cycle.segments[i];
     var off = Math.max(0, pos - seg.start);
+    // 快到段尾就把下一段预热，切换时不必等 B站
+    if (seg.duration - off < 25 && state.cycle.segments.length > 1) {
+      prefetchSegment(state.cycle.segments[(i + 1) % state.cycle.segments.length]);
+    }
     el.npBar.style.width = Math.min(100, off / seg.duration * 100) + '%';
     el.npPos.textContent = fmtClock(off);
     // 同一单元内跨过片段边界时，只更新高亮，不打断播放
@@ -1799,25 +2419,28 @@
     }
   }
 
+  function updateMetaText() {
+    if (!state.meta.count) return;
+    // 实时抓取时 generated_at 是「刚刚」，离线快照则是采集时刻。
+    // 明确写出来，用户能一眼看出看到的是不是最新数据。
+    var when = '';
+    if (state.meta.generated_at) {
+      var g = new Date(state.meta.generated_at * 1000);
+      when = state.meta.live
+        ? ' · 实时数据 ' + hhmm(g)
+        : ' · 快照于 ' + (g.getMonth() + 1) + '-' + pad2(g.getDate())
+          + ' ' + hhmm(g);
+    }
+    el.meta.textContent = '数据源：' + (state.meta.up_name || '')
+      + ' · 系列「直播回放」 · ' + state.meta.count + ' 个节目' + when;
+  }
+
   function boot(data) {
     state.all = data.programs || [];
     state.meta = data.meta || {};
     state.muted = state.mutedDefault;
 
-    if (state.meta.count) {
-      // 实时抓取时 generated_at 是「刚刚」，离线快照则是采集时刻。
-      // 明确写出来，用户能一眼看出看到的是不是最新数据。
-      var when = '';
-      if (state.meta.generated_at) {
-        var g = new Date(state.meta.generated_at * 1000);
-        when = state.meta.live
-          ? ' · 实时数据 ' + hhmm(g)
-          : ' · 快照于 ' + (g.getMonth() + 1) + '-' + pad2(g.getDate())
-            + ' ' + hhmm(g);
-      }
-      el.meta.textContent = '数据源：' + (state.meta.up_name || '')
-        + ' · 系列「直播回放」 · ' + state.meta.count + ' 个节目' + when;
-    }
+    updateMetaText();
 
     renderChips();
     renderList();
@@ -1855,8 +2478,42 @@
   }
 
   function init() {
+    pageSetup();                 // 先报到：本服务靠页面心跳判断「网页是不是全关了」
     el = {
-      chips: document.getElementById('chips'),
+      netAlert: document.getElementById('net-alert'),
+    keysList: document.getElementById('keys-list'),
+    keysTip: document.getElementById('keys-tip'),
+    keysReset: document.getElementById('keys-reset'),
+    segAuto: document.getElementById('seg-auto'),
+    segRun: document.getElementById('seg-run'),
+    segNote: document.getElementById('seg-note'),
+    segState: document.getElementById('seg-state'),
+    protoLink: document.getElementById('proto-link'),
+    protoReg: document.getElementById('proto-reg'),
+    protoUnreg: document.getElementById('proto-unreg'),
+    protoState: document.getElementById('proto-state'),
+    liveInfo: document.getElementById('live-info'),
+    liveQn: document.getElementById('live-qn'),
+    liveQnBox: document.getElementById('live-qn-box'),
+    liveChat: document.getElementById('live-chat'),
+    liveChatState: document.getElementById('live-chat-state'),
+    liveCredState: document.getElementById('live-cred-state'),
+    liveCredBox: document.getElementById('live-cred-box'),
+    liveJct: document.getElementById('live-jct'),
+    liveJctSave: document.getElementById('live-jct-save'),
+    liveMsg: document.getElementById('live-msg'),
+    liveSend: document.getElementById('live-send'),
+    liveResult: document.getElementById('live-result'),
+    wheelMsg: document.getElementById('wheel-msg'),
+    wheelInterval: document.getElementById('wheel-interval'),
+    wheelCount: document.getElementById('wheel-count'),
+    wheelStart: document.getElementById('wheel-start'),
+    wheelStop: document.getElementById('wheel-stop'),
+    wheelState: document.getElementById('wheel-state'),
+    wheelPop: document.getElementById('wheel-pop'),
+    wheelToggle: document.getElementById('wheel-toggle'),
+    wheelClose: document.getElementById('wheel-close'),
+    chips: document.getElementById('chips'),
       rows: document.getElementById('rows'),
       stat: document.getElementById('stat'),
       pageInfo: document.getElementById('page-info'),
@@ -1968,13 +2625,46 @@
         });
     }
 
-    loadLive(20000)
-      .catch(function (e) {
+    // 起播不等服务端：先用手上这份清单（页面自带的 data/programs.js）立刻开播，
+    // 抓最新清单放到后台做。实测 programs?refresh=1 要 1.2 秒，让它挡在起播前面
+    // 就是白等 —— 拿到新清单后「软刷新」，不打断正在播的那一段。
+    if (window.PROGRAMS && window.PROGRAMS.programs && window.PROGRAMS.programs.length) {
+      boot(window.PROGRAMS);
+      loadLive(20000).then(function (live) {
+        window.__LIVE_OK = true;
+        if (!live || !live.programs || !live.programs.length) return;
+        var same = live.meta && live.meta.count === (state.meta || {}).count
+                   && (state.all[0] || {}).bvid === live.programs[0].bvid;
+        // 清单没变也要更新 meta：那里显示「实时数据 HH:MM」，
+        // 是用户判断「看到的是不是最新」的唯一依据（verify_release 也看这个）
+        state.meta = live.meta || state.meta;
+        updateMetaText();
+        if (same) return;
+        // 只换数据，不动正在跑的循环：循环里段的时间轴是按 epoch 算的，
+        // 重建会让当前位置映射到别的段，播放就会被打断重载（实测跳了一次）。
+        // 标记为「待重建」，等下一次自然换段时再套用。
+        state.all = live.programs;
+        state.cycleStale = true;
+        renderChips();
+        renderList();
+      }).catch(function (e) {
         window.__LIVE_ERR = e && e.message ? e.message : String(e);
-        return loadLocal();
-      })
-      .then(boot)
-      .catch(fail);
+      });
+      prefetchLiveStatus();
+    } else {
+      loadLive(20000)
+        .catch(function (e) {
+          window.__LIVE_ERR = e && e.message ? e.message : String(e);
+          return loadLocal();
+        })
+        .then(boot)
+        .catch(fail);
+    }
+  }
+
+  // 提前问一次直播状态：等用户切到直播间时是热的（服务端缓存 60 秒）
+  function prefetchLiveStatus() {
+    fetch('/api/live/playinfo').catch(function () { /* 离线时忽略 */ });
   }
 
   if (document.readyState === 'loading') {

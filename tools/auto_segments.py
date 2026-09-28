@@ -796,6 +796,177 @@ def process_part(ff, bvid, part, args, cache):
     return result, complete
 
 
+# ------------------------------------------------------------ 可复用入口
+# 下面这几个函数同时给 CLI（main）和网页端（tools/serve.py）使用，
+# 保证「网页里点一下」和「命令行跑一次」走的是同一套逻辑。
+
+def ensure_dirs():
+    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(WORK, exist_ok=True)
+
+
+def load_cache(path):
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def save_cache(path, cache):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False)
+
+
+def default_args(**over):
+    """CLI 与网页端共用的参数默认值（网页端不必走 argparse）。"""
+    a = argparse.Namespace(limit_sec=0, min_seg=45.0, max_seg=720.0, min_gap=50.0,
+                           snap=90.0, sung=True, dry_run=False, ffmpeg=None)
+    for k, v in over.items():
+        setattr(a, k, v)
+    return a
+
+
+def process_program(ff, p, args, cache, cache_path, logf=log):
+    """处理一个投稿的全部分P（命中缓存的分P 跳过）。返回 (已算, 跳过)。"""
+    logf("\n[%s] %s（%s）" % (p["category"], p["title"], p["date"]))
+    done = skip = 0
+    for part in p["parts"]:
+        cid = str(part["cid"])
+        key = cache_key(cid, args.min_seg, args.min_gap, args.snap)
+        if key in cache and not args.limit_sec:
+            logf("      cid %s：命中缓存，跳过" % cid)
+            skip += 1
+            continue
+        try:
+            part["_url"] = audio_url(p["bvid"], part["cid"])
+        except Exception as e:
+            logf("      ! 取音频地址失败：%s" % e)
+            continue
+        try:
+            segs, complete = process_part(ff, p["bvid"], part, args, cache)
+            # 只缓存「有结果且覆盖充分」的分P：空结果或覆盖不足可能来自下载失败，
+            # 缓存了就不会再重试；调试用的截断结果同样不写缓存
+            if not args.limit_sec and segs and complete:
+                cache[key] = segs
+                save_cache(cache_path, cache)
+                done += 1
+            elif not complete:
+                logf("      （覆盖不足，未写入缓存，下次会重试）")
+        except Exception as e:
+            logf("      ! 处理失败：%s" % e)
+    return done, skip
+
+
+def load_existing_segments(path):
+    """读现有 segments.js → {cid: [(start, end), ...]}，用于与本次结果合并。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            txt = f.read()
+    except OSError:
+        return {}
+    m = re.search(r"window\.SEGMENTS\s*=\s*(\{.*\})\s*;", txt, re.S)
+    if not m:
+        return {}
+    try:
+        raw = json.loads(m.group(1))
+    except Exception:
+        return {}
+    out = {}
+    for cid, segs in raw.items():
+        try:
+            out[cid] = [(s["start"], s["end"]) for s in segs]
+        except Exception:
+            continue
+    return out
+
+
+def write_segments(cache, dry_run=False):
+    """把缓存归并后写 data/segments.js（写前备份上一版）。返回分P 数。"""
+    # 按 cid 归并：同一个 cid 可能同时有「当前版本」与「旧版本」两条记录，
+    # 取当前版本的；没有当前版本的 cid 沿用旧版本（渐进升级，不丢未重跑的分P）。
+    cur = {}
+    old = {}
+    for k, segs in cache.items():
+        if not segs:
+            continue
+        parts = k.split("|")
+        cid = parts[0]
+        if len(parts) >= 5 and parts[4] == CACHE_VERSION:
+            cur[cid] = segs
+        else:
+            old[cid] = segs
+    out = dict(old)
+    out.update(cur)
+    log("\n共 %d 个分P 有片段（当前版本 %d 个，沿用旧版本 %d 个）"
+        % (len(out), len(cur), len([c for c in out if c not in cur])))
+    if dry_run:
+        log("--dry-run：未写入文件")
+        return len(out)
+
+    path = os.path.join(DATA, "segments.js")
+    # 与现有文件合并：打包版第一次跑时本地缓存是空的，只写缓存会把已有结果整份抹掉
+    # （实测 46 → 1）。已有 cid 保留，本次算出来的覆盖它。
+    merged = load_existing_segments(path)
+    kept = len(merged)
+    merged.update(out)
+    if len(merged) != len(out):
+        log("合并现有结果：原有 %d 个分P，本次新增/更新 %d 个，合计 %d 个"
+            % (kept, len(merged) - kept, len(merged)))
+
+    # 写前留一份上一版：分段结果重算成本很高（要重新下载音频），
+    # 万一这次结果异常（例如某个分P 覆盖不足），还能整份回退。
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                prev = f.read()
+            with open(path + ".bak", "w", encoding="utf-8") as f:
+                f.write(prev)
+            log("已备份上一版到 %s.bak" % os.path.basename(path))
+        except Exception as e:
+            log("（备份失败，不影响写入：%s）" % e)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("/* 由 tools/auto_segments.py 自动生成，可用页面「标注」手工修正 */\n")
+        f.write("/* 每一版都会把上一版备份到 segments.js.bak */\n")
+        f.write("window.SEGMENTS = ")
+        json.dump({k: [{"start": a, "end": b, "label": ""} for a, b in v]
+                   for k, v in merged.items()}, f, ensure_ascii=False, indent=1)
+        f.write(";\n")
+    log("已写入 %s（%d 个分P / %d 段）"
+        % (path, len(merged), sum(len(v) for v in merged.values())))
+    return len(merged)
+
+
+def process_bvid(bvid, logf=None, ff=None, **over):
+    """网页端入口：给单个投稿补齐分段并重写 segments.js，返回摘要 dict。
+
+    全程在本进程内完成（不打子进程）—— 打包版没有可用的 python 解释器。
+    """
+    logf = logf or log
+    args = default_args(**over)
+    ff = ff or find_ffmpeg(args.ffmpeg)
+    if not ff:
+        return {"ok": False, "error": "未找到 ffmpeg，无法分析音频"}
+    ensure_dirs()
+    cache_path = os.path.join(CACHE, "auto_seg.json")
+    cache = load_cache(cache_path)
+    programs = load_programs()["programs"]
+    targets = [p for p in programs if p["bvid"] == bvid]
+    if not targets:
+        return {"ok": False, "error": "节目单里没有 %s" % bvid}
+    done = skip = 0
+    for p in targets:
+        d, s = process_program(ff, p, args, cache, cache_path, logf=logf)
+        done += d
+        skip += s
+    total = write_segments(cache, args.dry_run)
+    return {"ok": True, "bvid": bvid, "title": targets[0]["title"],
+            "processed": done, "skipped": skip,
+            "parts": len(targets[0]["parts"]), "segments": total}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bvid")
@@ -823,21 +994,18 @@ def main():
     log("ffmpeg: %s" % ff)
 
     os.makedirs(CACHE, exist_ok=True)
-    os.makedirs(WORK, exist_ok=True)
+    ensure_dirs()
 
     cache_path = os.path.join(CACHE, "auto_seg.json")
-    cache = {}
-    if os.path.exists(cache_path):
-        with open(cache_path, encoding="utf-8") as f:
-            cache = json.load(f)
-        ver = CACHE_VERSION
-        stale = [k for k in cache if not k.endswith("|" + ver)]
-        if stale:
-            # 不要删除旧版本结果：只跑了一个 bvid 时，剩下的 59 个分P 若被一并清掉，
-            # segments.js 会从 851 段骤降到几段。旧结果留在文件里，写 segments.js 时
-            # 按 cid「新版本优先、旧版本兜底」，就能渐进升级而不丢数据。
-            log("缓存中有 %d 条旧版本（%s 之前）结果，本次未重跑的分P 将继续沿用它们"
-                % (len(stale), ver))
+    cache = load_cache(cache_path)
+    ver = CACHE_VERSION
+    stale = [k for k in cache if not k.endswith("|" + ver)]
+    if stale:
+        # 不要删除旧版本结果：只跑了一个 bvid 时，剩下的 59 个分P 若被一并清掉，
+        # segments.js 会从 851 段骤降到几段。旧结果留在文件里，写 segments.js 时
+        # 按 cid「新版本优先、旧版本兜底」，就能渐进升级而不丢数据。
+        log("缓存中有 %d 条旧版本（%s 之前）结果，本次未重跑的分P 将继续沿用它们"
+            % (len(stale), ver))
 
     programs = load_programs()["programs"]
     if args.bvid:
@@ -858,73 +1026,9 @@ def main():
         % (len(targets), sum(p["duration"] for p in targets) / 3600.0))
 
     for p in targets:
-        log("\n[%s] %s（%s）" % (p["category"], p["title"], p["date"]))
-        for part in p["parts"]:
-            cid = str(part["cid"])
-            key = cache_key(cid, args.min_seg, args.min_gap, args.snap)
-            if key in cache and not args.limit_sec:
-                log("      cid %s：命中缓存，跳过" % cid)
-                continue
-            try:
-                part["_url"] = audio_url(p["bvid"], part["cid"])
-            except Exception as e:
-                log("      ! 取音频地址失败：%s" % e)
-                continue
-            try:
-                segs, complete = process_part(ff, p["bvid"], part, args, cache)
-                # 只缓存「有结果且覆盖充分」的分P：空结果或覆盖不足可能来自下载失败，
-                # 缓存了就不会再重试；调试用的截断结果同样不写缓存
-                if not args.limit_sec and segs and complete:
-                    cache[key] = segs
-                    with open(cache_path, "w", encoding="utf-8") as f:
-                        json.dump(cache, f, ensure_ascii=False)
-                elif not complete:
-                    log("      （覆盖不足，未写入缓存，下次会重试）")
-            except Exception as e:
-                log("      ! 处理失败：%s" % e)
+        process_program(ff, p, args, cache, cache_path)
 
-    # 按 cid 归并：同一个 cid 可能同时有「当前版本」与「旧版本」两条记录，
-    # 取当前版本的；没有当前版本的 cid 沿用旧版本（渐进升级，不丢未重跑的分P）。
-    cur = {}
-    old = {}
-    for k, segs in cache.items():
-        if not segs:
-            continue
-        parts = k.split("|")
-        cid = parts[0]
-        if len(parts) >= 5 and parts[4] == CACHE_VERSION:
-            cur[cid] = segs
-        else:
-            old[cid] = segs
-    out = dict(old)
-    out.update(cur)
-    log("\n共 %d 个分P 有片段（当前版本 %d 个，沿用旧版本 %d 个）"
-        % (len(out), len(cur), len([c for c in out if c not in cur])))
-    if args.dry_run:
-        log("--dry-run：未写入文件")
-        return 0
-
-    path = os.path.join(DATA, "segments.js")
-    # 写前留一份上一版：分段结果重算成本很高（要重新下载音频），
-    # 万一这次结果异常（例如某个分P 覆盖不足），还能整份回退。
-    if os.path.exists(path) and not args.dry_run:
-        try:
-            with open(path, encoding="utf-8") as f:
-                prev = f.read()
-            with open(path + ".bak", "w", encoding="utf-8") as f:
-                f.write(prev)
-            log("已备份上一版到 %s.bak" % os.path.basename(path))
-        except Exception as e:
-            log("（备份失败，不影响写入：%s）" % e)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write("/* 由 tools/auto_segments.py 自动生成，可用页面「标注」手工修正 */\n")
-        f.write("/* 每一版都会把上一版备份到 segments.js.bak */\n")
-        f.write("window.SEGMENTS = ")
-        json.dump({k: [{"start": a, "end": b, "label": ""} for a, b in v]
-                   for k, v in out.items()}, f, ensure_ascii=False, indent=1)
-        f.write(";\n")
-    log("已写入 %s（%d 个分P / %d 段）"
-        % (path, len(out), sum(len(v) for v in out.values())))
+    write_segments(cache, args.dry_run)
     return 0
 
 

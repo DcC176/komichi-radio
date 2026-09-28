@@ -17,9 +17,11 @@
   </div>
   <nav class="tb-tabs">
     <a class="tab" data-view="live" href="#/live">24 小时频道</a>
+    <a class="tab" data-view="broadcast" href="#/broadcast">直播间</a>
     <a class="tab" data-view="schedule" href="#/schedule">节目单</a>
     <a class="tab" data-view="categories" href="#/categories">分类</a>
     <a class="tab" data-view="about" href="#/about">关于</a>
+    <a class="tab" data-view="settings" href="#/settings">设置</a>
   </nav>
   <div class="tb-right">
     <a class="ghost-btn" href="https://space.bilibili.com/1512246445" target="_blank" rel="noopener">
@@ -63,6 +65,8 @@
         </label>
       </div>
 
+      <div class="net-alert" id="net-alert" hidden></div>
+
       <div class="list-head">
         <div>
           <span class="stat" id="stat">—</span>
@@ -94,6 +98,63 @@
       </table>
 
       <div class="stat" id="meta-line" style="margin-top:18px"></div>
+    </section>
+
+    <section class="view" id="view-broadcast">
+      <div class="eyebrow">—— 直播间</div>
+      <div class="live-card live-status-card">
+        <div class="live-card-h">直播状态</div>
+        <div class="live-info" id="live-info">正在获取开播状态…</div>
+        <label class="live-qn" id="live-qn-box" hidden>清晰度
+          <select id="live-qn"></select>
+        </label>
+      </div>
+
+      <div class="live-card live-chat-card">
+        <div class="live-card-h">实时弹幕<span class="live-wheel-note" id="live-chat-state"></span></div>
+        <div class="live-chat" id="live-chat">
+          <div class="chat-line chat-sys">连接弹幕服务器…</div>
+        </div>
+      </div>
+
+      <div class="live-card">
+        <div class="live-card-h">发弹幕
+          <button class="btn small ghost live-wheel-btn" id="wheel-toggle" type="button">独轮车</button>
+        </div>
+        <p class="live-note" id="live-cred-state">正在检查登录状态…</p>
+        <div class="live-cred" id="live-cred-box" hidden>
+          <input id="live-jct" type="password" autocomplete="off"
+                 placeholder="粘贴 bili_jct（扫码登录会自动带上）">
+          <button class="btn small primary" id="live-jct-save">保存</button>
+        </div>
+        <div class="live-send">
+          <input id="live-msg" maxlength="30" placeholder="发条弹幕吧（最多 30 字）">
+          <button class="btn small primary" id="live-send">发送</button>
+        </div>
+        <div class="live-result" id="live-result"></div>
+      </div>
+
+      <div class="live-wheel-pop" id="wheel-pop" hidden>
+        <div class="live-card">
+          <div class="live-card-h">独轮车
+            <button class="btn small ghost live-wheel-btn" id="wheel-close" type="button">收起</button>
+          </div>
+          <p class="live-note">循环发送同一条弹幕。刷屏有被 B 站限流或封禁弹幕权限的风险，
+            请节制；连续 3 次发送失败会自动停止。</p>
+          <div class="live-send">
+            <input id="wheel-msg" maxlength="30" placeholder="要循环发送的弹幕">
+          </div>
+          <div class="live-wheel-opts">
+            <label>间隔 <input id="wheel-interval" type="number" min="1" max="60" step="0.5" value="3"> 秒</label>
+            <label>条数 <input id="wheel-count" type="number" min="1" max="200" value="20"> 条</label>
+          </div>
+          <div class="qp-btns">
+            <button class="btn small primary" id="wheel-start">开始</button>
+            <button class="btn small ghost" id="wheel-stop" hidden>停止</button>
+          </div>
+          <div class="live-result" id="wheel-state"></div>
+        </div>
+      </div>
     </section>
 
     <section class="view" id="view-schedule">
@@ -150,6 +211,48 @@
       <div class="eyebrow">—— 关于</div>
       <h1 class="title sm">关于这个频道</h1>
       <div class="about-grid" id="about-body"></div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <div class="eyebrow">—— 设置</div>
+      <h1 class="title sm">设置</h1>
+      <p class="sub">快捷键<b>默认全部留空</b>，需要你自己按一遍来绑定。绑定后在任何页面都生效；
+        只存在本机浏览器里，不上传。</p>
+
+      <div class="live-card">
+        <div class="live-card-h">快捷键
+          <button class="btn small ghost live-wheel-btn" id="keys-reset" type="button">全部清除</button>
+        </div>
+        <div class="key-list" id="keys-list"></div>
+        <p class="live-note" id="keys-tip">点右侧按键格，然后按下你想用的组合键（Esc 取消）。</p>
+      </div>
+
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">自动分段
+          <button class="btn small ghost live-wheel-btn" id="seg-run" type="button">给最新一期分段</button>
+        </div>
+        <label class="seg-auto">
+          <input type="checkbox" id="seg-auto"> 出现新回放时自动分段
+        </label>
+        <p class="live-note">分段＝把回放里「在唱」的片段切出来，靠下载音频 + ffmpeg 分析得到，
+          每场几分钟到十几分钟。开启后只对新出现的回放生效，不会回头补历史缺口。</p>
+        <div class="live-result" id="seg-note"></div>
+        <div class="live-result" id="seg-state"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">从浏览器一键启动</div>
+        <p class="live-note">浏览器不能直接运行 EXE，所以要注册一个自定义协议（只写当前用户，
+          不需要管理员）。注册后把下面的链接<b>拖到书签栏</b>：以后点这个书签就能启动本程序
+          —— 没在跑就启动，已在跑就把页面打开。</p>
+        <p class="proto-row">
+          <a class="proto-link" id="proto-link" href="#" draggable="true">▶ 启动小路电台</a>
+        </p>
+        <div class="qp-btns">
+          <button class="btn small primary" id="proto-reg" type="button">注册 / 修复</button>
+          <button class="btn small ghost" id="proto-unreg" type="button">取消注册</button>
+        </div>
+        <div class="live-result" id="proto-state"></div>
+      </div>
     </section>
 
   </div>
@@ -320,6 +423,7 @@
 <script src="data/labels.js"></script>
 <script src="assets/qrcode.min.js"></script>
 <script src="assets/dash.all.min.js"></script>
+<script src="assets/mpegts.js"></script>
 <script src="assets/app.js"></script>
 <script>
 // 单文件分发后没有「停止.bat」了，停止入口放在页面上。

@@ -92,9 +92,34 @@ def build_exe():
         "--specpath", BUILD,
         # collect.py 是运行时用 importlib 动态加载的，PyInstaller 静态分析看不到，
         # 必须显式带上，否则 /api/programs 实时清单会整体失败。
+        # auto_segments.py 同理：网页里的「自动分段」就是在进程内调它的函数。
         # 路径必须写绝对路径：--specpath 之后，相对路径会被按 spec 所在目录解析。
         "--add-data", os.path.join(ROOT, "tools", "collect.py") + os.pathsep + "tools",
+        "--add-data", os.path.join(ROOT, "tools", "auto_segments.py") + os.pathsep + "tools",
+        # 边界精修：读画面「已唱」浮层峰值定歌边界，靠它才不会把歌从中间切开。
+        # 实测纯音频 25 段 / 带精修 27 段，与已有产物一致的是带精修那份 —— 必须一起打包。
+        "--add-data", os.path.join(ROOT, "tools", "seg_refine.py") + os.pathsep + "tools",
+        # 它们只被动态加载的 seg_refine 用到，静态分析看不到，得显式声明
+        # （numpy 34MB + pillow 7MB，EXE 会从 9.6MB 涨到 40MB 上下）。
+        "--hidden-import", "numpy",
+        "--hidden-import", "PIL",
+        "--hidden-import", "PIL.Image",
     ]
+
+    # FFmpeg：自动分段要把音频解码成 PCM，没有它这个功能在别人机器上直接不可用
+    # （find_ffmpeg 的兜底目录遍历只在个别机器上碰巧命中）。一起打包。
+    # 不把二进制放仓库里（84MB 进 git 太蠢），构建时按 find_ffmpeg 的同一套搜索找。
+    sys.path.insert(0, os.path.join(ROOT, "tools"))
+    from auto_segments import find_ffmpeg          # noqa: E402
+    ff = find_ffmpeg()
+    if ff:
+        args += ["--add-data", ff + os.pathsep + "ffmpeg"]
+        print("打包 FFmpeg：%s（%.0f MB）" % (ff, os.path.getsize(ff) / 1048576))
+    else:
+        print("！没找到 ffmpeg —— 打出来的 EXE 自动分段不可用（其余功能正常）")
+    lic = os.path.join(ROOT, "ffmpeg.LICENSE.txt")
+    if os.path.exists(lic):
+        args += ["--add-data", lic + os.pathsep + "."]
 
     # 网页文件与说明：单个文件放根目录，目录按原名放，与 serve.py 的释放逻辑对应
     for item in WEB:
