@@ -33,12 +33,14 @@ import argparse
 import csv
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(ROOT, "tools", ".cache")
@@ -57,7 +59,29 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 CHUNK = 600          # 每次处理的音频块长（秒）
-CHUNK_GAP = 0.4      # 请求间隔
+CHUNK_GAP = 0.4      # 请求间隔（串行时用；并发时靠并发数控制压力）
+# 同时下载/分析的音频块数。下载与 ffmpeg 解码都是「等 I/O」，串行等于把时间全花在等，
+# 实测并发能显著缩短整个音频阶段（见 process_part 里的注释）。
+CHUNK_WORKERS = 4
+
+# 打包版是 --noconsole，而 ffmpeg 是控制台程序 —— 每次调用都会新建一个控制台，
+# 识别时就会不停弹出黑窗。CREATE_NO_WINDOW 让它彻底不出现（POSIX 上是 0，无副作用）。
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
+def _hide_startupinfo():
+    """Windows 上的双保险：CREATE_NO_WINDOW 让子进程根本没有控制台，
+    STARTF_USESHOWWINDOW + SW_HIDE 兜住「万一还是创建了一个窗口」的情况。
+    POSIX 上返回 None（subprocess 接受 None）。"""
+    if os.name != "nt":
+        return None
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 0          # SW_HIDE
+    return si
+
+
+HIDE_SI = _hide_startupinfo()
 
 
 def find_ffmpeg(explicit=None):
@@ -87,8 +111,28 @@ def find_ffmpeg(explicit=None):
     return None
 
 
+# 网页端可以把日志接进自己的作业面板（tools/serve.py 会装一个 sink）；
+# 不装时就是普通的 print —— 命令行的行为一个字都没变。
+LOG_SINK = [None]
+
+
 def log(msg):
-    print(msg, flush=True)
+    sink = LOG_SINK[0]
+    if sink is None:
+        print(msg, flush=True)
+    else:
+        sink(msg)
+
+
+# 网页端把进度接进 /api/segments/status（tools/serve.py 装 sink），不装就什么都不做。
+# 上报的是「真的分析到第几秒」，不是估算 —— 落地在下面 process_part 的分块循环里。
+PROGRESS_SINK = [None]
+
+
+def report_progress(**kw):
+    sink = PROGRESS_SINK[0]
+    if sink is not None:
+        sink(kw)
 
 
 def get_json(url, referer="https://www.bilibili.com"):
@@ -120,11 +164,15 @@ def audio_url(bvid, cid):
 
 def run_ff(ff, args, timeout=600, cwd=None):
     return subprocess.run([ff, "-hide_banner", "-loglevel", "error"] + args,
-                          capture_output=True, timeout=timeout, cwd=cwd)
+                          capture_output=True, timeout=timeout, cwd=cwd,
+                          creationflags=NO_WINDOW, startupinfo=HIDE_SI)
 
 
-def chunk_features(ff, url, start, dur, wavname):
+def chunk_features(ff, url, start, dur, wavname, cwd=None):
     """取 [start, start+dur) 的音频并算出逐秒特征。结果按块落盘缓存。
+
+    cwd 是临时目录：并发时每个块必须用自己的目录（wav 与 ffmpeg 的输出文件名固定，
+    共用一个目录会互相覆盖）。缓存键只跟 cid + start 有关，不受它影响。
 
     特征（每秒一组，因为 asetnsamples=n=16000 配 16kHz 正好一秒一块）：
         rms_full    整体响度
@@ -138,8 +186,9 @@ def chunk_features(ff, url, start, dur, wavname):
     参数无关 —— 把它缓存下来，改判据 / 重跑其它分P 就只花几分钟。
 
     注意：ffmpeg 滤镜参数里 file= 的值不能带盘符（`:` 会被当成选项分隔符），
-    所以统一用相对文件名并在 WORK 目录下执行。
+    所以统一用相对文件名并在工作目录下执行。
     """
+    cwd = cwd or WORK
     fc = os.path.join(FEAT, "%s_%d_%s.json" % (wavname[:-4], start, FEAT_VERSION))
     if os.path.exists(fc):
         try:
@@ -153,9 +202,9 @@ def chunk_features(ff, url, start, dur, wavname):
     hdr = "Referer: https://www.bilibili.com\r\nUser-Agent: %s\r\n" % UA
     r = run_ff(ff, ["-headers", hdr, "-ss", str(start), "-t", str(dur),
                     "-i", url, "-vn", "-ac", "1", "-ar", "16000",
-                    "-c:a", "pcm_s16le", "-y", wavname], cwd=WORK)
-    if not os.path.exists(os.path.join(WORK, wavname)) \
-            or os.path.getsize(os.path.join(WORK, wavname)) < 1000:
+                    "-c:a", "pcm_s16le", "-y", wavname], cwd=cwd)
+    if not os.path.exists(os.path.join(cwd, wavname)) \
+            or os.path.getsize(os.path.join(cwd, wavname)) < 1000:
         raise RuntimeError("下载失败：%s" % r.stderr.decode("utf-8", "replace")[-200:])
 
     def band(name, filt, key, parse=None):
@@ -164,9 +213,9 @@ def chunk_features(ff, url, start, dur, wavname):
                     ("%sasetnsamples=n=16000,astats=metadata=1:reset=1:length=1,"
                      "ametadata=print:key=%s:file=%s:direct=1"
                      % (filt, key, out)),
-                    "-f", "null", "-"], cwd=WORK)
+                    "-f", "null", "-"], cwd=cwd)
         vals = []
-        with open(os.path.join(WORK, out), encoding="utf-8", errors="replace") as f:
+        with open(os.path.join(cwd, out), encoding="utf-8", errors="replace") as f:
             for line in f:
                 m = re.search(re.escape(key) + r"=(-?[\d.]+|-?inf|nan)", line)
                 if not m:
@@ -715,14 +764,9 @@ def detect(rows, min_seg, min_gap, max_seg=720, snap=90, keys=None):
 # ---------------------------------------------------------------- 主流程
 
 def clean_work(path):
-    """尽力清理临时 wav；删不掉只记日志，绝不影响退出码（本机删除受限）"""
+    """尽力清理临时 wav；删不掉只记日志，绝不影响退出码。"""
     try:
-        subprocess.run([sys.executable, "-c",
-                        "import os,sys\n"
-                        "p=sys.argv[1]\n"
-                        "try:\n os.remove(p)\n"
-                        "except Exception:\n pass\n", path],
-                       capture_output=True, timeout=60)
+        os.remove(path)
     except Exception:
         pass
     if os.path.exists(path):
@@ -747,42 +791,78 @@ def process_part(ff, bvid, part, args, cache):
     total = int(part["duration"])
     if args.limit_sec:
         total = min(total, args.limit_sec)
+    # 工作量口径：音频分析 1 份，「已唱」精修再 1 份（截断运行 / 无精修依赖时只有 1 份）。
+    # analyzed/total 直接就是总进度，两个阶段之间只增不减，不会出现 100% → 50% 的回跳。
+    phases = 2 if (args.sung and not args.limit_sec) else 1
+    report_progress(cid=cid, analyzed=0, total=total * phases, audio_total=total,
+                    phases=phases, refine_ratio=0.0, stage="下载音频")
     rows = []
     ok_sec = 0
-    for start in range(0, total, CHUNK):
-        dur = min(CHUNK, total - start)
-        got = False
-        for attempt in range(3):          # CDN 偶发 5XX，重试
-            try:
-                got_rows = chunk_features(ff, part["_url"], start, dur,
-                                          "chunk_%s.wav" % cid)
-                rows.extend(got_rows)
-                ok_sec += len(got_rows)
-                got = True
-                break
-            except Exception as e:
-                if attempt == 2:
-                    log("      ! %d-%ds 失败（已重试 3 次）：%s"
-                        % (start, start + dur, str(e)[-120:]))
-                else:
-                    time.sleep(2 + attempt * 3)
-        if not got:
-            pass
-        time.sleep(CHUNK_GAP)
+    jobs = [(start, min(CHUNK, total - start)) for start in range(0, total, CHUNK)]
+    workers = max(1, min(CHUNK_WORKERS, len(jobs)))
+
+    # 固定数量的工作目录，用队列分配：wav 与 ffmpeg 的输出文件名是固定的，
+    # 并发时不能共用一个目录；而用完就删会撞上本机的删除保护（批量删除会杀进程），
+    # 所以改成「固定几个目录、覆盖写、不删除」，磁盘占用恒定。
+    slots = queue.Queue()
+    for i in range(workers):
+        slots.put(i)
+
+    def one_chunk(job):
+        start, dur = job
+        slot = slots.get()
+        try:
+            cwd = os.path.join(WORK, "w%d" % slot)
+            os.makedirs(cwd, exist_ok=True)
+            for attempt in range(3):                # CDN 偶发 5XX，重试
+                try:
+                    return chunk_features(ff, part["_url"], start, dur,
+                                          "chunk_%s.wav" % cid, cwd=cwd)
+                except Exception as e:
+                    if attempt == 2:
+                        log("      ! %d-%ds 失败（已重试 3 次）：%s"
+                            % (start, start + dur, str(e)[-120:]))
+                    else:
+                        time.sleep(2 + attempt * 3)
+            return []
+        finally:
+            slots.put(slot)
+
+    # 并发：每块都要「下载 600 秒音频 + 跑 4 遍 ffmpeg」，绝大部分时间是在等 I/O，
+    # 串行等于把等待全部叠加。map 按提交顺序产出，rows 的顺序与原来完全一致。
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for got_rows in ex.map(one_chunk, jobs):
+            rows.extend(got_rows)
+            ok_sec += len(got_rows)
+            # 每块处理完就上报一次：块失败的那一块 ok_sec 不涨，进度也就停在原地
+            report_progress(cid=cid, analyzed=min(ok_sec, total), total=total * phases,
+                            audio_total=total, phases=phases, stage="分析音频")
+    if workers == 1:
+        time.sleep(CHUNK_GAP)             # 串行时保留原有的请求间隔
     clean_work(os.path.join(WORK, "chunk_%s.wav" % cid))
 
     # 「已唱」浮层峰值：抽取并差分左上角区域，得到歌边界。
     # 拿不到（无浮层 / 缺依赖 / 网络失败）时返回空，detect 自动退化为纯音频流程。
+    # 注意：这一步要下载整支视频，与上面的音频并发一起跑会互相抢带宽 —— 实测两边
+    # 都慢好几倍（音频 36s→139s、抽帧 9s→277s），所以必须串行，不要「优化」成并行。
     keys = []
     if args.sung and not args.limit_sec:
+        report_progress(cid=cid, phases=phases, audio_total=total,
+                        refine_ratio=0.0, stage="读取「已唱」浮层")
         try:
             from seg_refine import detect_keys
-            keys = detect_keys(bvid, cid, duration=total, ffmpeg=args.ffmpeg)
+            keys = detect_keys(bvid, cid, duration=total, ffmpeg=args.ffmpeg,
+                               progress=lambda ratio: report_progress(
+                                   cid=cid, phases=phases, audio_total=total,
+                                   refine_ratio=max(0.0, min(1.0, ratio)),
+                                   stage="读取「已唱」浮层"))
         except ImportError as e:
             log("      ! 缺少依赖（%s），本次只用音频。"
                 "如需边界精修：pip install numpy pillow" % e)
         except Exception as e:
             log("      ! 取「已唱」边界失败，回退音频结果：%s" % str(e)[-120:])
+        report_progress(cid=cid, phases=phases, audio_total=total,
+                        refine_ratio=1.0, stage="读取「已唱」浮层")
 
     segs, thr, bthr, changed = detect(rows, args.min_seg, args.min_gap,
                                       args.max_seg, args.snap, keys=keys)
@@ -793,6 +873,9 @@ def process_part(ff, bvid, part, args, cache):
         % (cid, ok_sec, total, len(result), thr or 0, bthr or 0, changed,
            len(keys), sum(b - a for a, b in result) / 60.0,
            "" if complete else "  ⚠ 覆盖不足，不写缓存"))
+    report_progress(cid=cid, analyzed=total, total=total * phases,
+                    audio_total=total, phases=phases, refine_ratio=1.0,
+                    stage="计算边界")
     return result, complete
 
 
@@ -833,11 +916,27 @@ def process_program(ff, p, args, cache, cache_path, logf=log):
     """处理一个投稿的全部分P（命中缓存的分P 跳过）。返回 (已算, 跳过)。"""
     logf("\n[%s] %s（%s）" % (p["category"], p["title"], p["date"]))
     done = skip = 0
-    for part in p["parts"]:
+    parts = len(p["parts"])
+    for idx, part in enumerate(p["parts"]):
         cid = str(part["cid"])
+        # 投稿级的进度（第几个分P、标题）在这里报，分P 内部的秒数在 process_part 里报；
+        # 工作量口径与 process_part 一致：音频 1 份 + 精修 1 份（无精修时 1 份）。
+        phases = 2 if (args.sung and not args.limit_sec) else 1
+        report_progress(bvid=p["bvid"], title=p["title"], cid=cid,
+                        part_index=idx + 1, parts=parts,
+                        analyzed=0, total=int(part["duration"]) * phases,
+                        audio_total=int(part["duration"]), phases=phases,
+                        refine_ratio=0.0, stage="准备")
         key = cache_key(cid, args.min_seg, args.min_gap, args.snap)
         if key in cache and not args.limit_sec:
             logf("      cid %s：命中缓存，跳过" % cid)
+            # 命中缓存也要把进度报满 —— 不然这一分P 的进度条会停在「准备」不动
+            report_progress(bvid=p["bvid"], title=p["title"], cid=cid,
+                            part_index=idx + 1, parts=parts,
+                            analyzed=int(part["duration"]),
+                            total=int(part["duration"]),
+                            audio_total=int(part["duration"]), phases=1,
+                            refine_ratio=1.0, stage="命中缓存，跳过")
             skip += 1
             continue
         try:
@@ -939,10 +1038,12 @@ def write_segments(cache, dry_run=False):
     return len(merged)
 
 
-def process_bvid(bvid, logf=None, ff=None, **over):
+def process_bvid(bvid, logf=None, ff=None, programs=None, **over):
     """网页端入口：给单个投稿补齐分段并重写 segments.js，返回摘要 dict。
 
     全程在本进程内完成（不打子进程）—— 打包版没有可用的 python 解释器。
+    programs 可以不传（默认读 data/programs.json）；网页端把「实时清单里的那一条」
+    传进来，否则刚发布的新回放会因为 programs.json 还没更新而找不到。
     """
     logf = logf or log
     args = default_args(**over)
@@ -952,7 +1053,7 @@ def process_bvid(bvid, logf=None, ff=None, **over):
     ensure_dirs()
     cache_path = os.path.join(CACHE, "auto_seg.json")
     cache = load_cache(cache_path)
-    programs = load_programs()["programs"]
+    programs = programs if programs is not None else load_programs()["programs"]
     targets = [p for p in programs if p["bvid"] == bvid]
     if not targets:
         return {"ok": False, "error": "节目单里没有 %s" % bvid}

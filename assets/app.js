@@ -16,7 +16,183 @@
   // 歌曲类场次：画面没读到文字时，按段长估算「约 N 首」才有意义；
   // 游戏/杂谈/联动 没有歌，只能按「第 N 段」定位。
   var MUSIC_CATS = { '唱歌': 1, '电台': 1 };
-  var VIEWS = ['live', 'broadcast', 'schedule', 'categories', 'about', 'settings'];
+  /* ---------- 多主播：当前正在看谁 ----------
+     所有「按主播区分」的接口都靠 stq() 自动带上 station 参数，切换器改一次 ST，
+     清单 / 分段 / 直播 / 弹幕就整体跟着切。这里包装 window.fetch 一次覆盖全部调用，
+     比逐个去改 URL 更不容易漏（漏一个就会出现「界面上是小路、数据是别人」的串台）。
+     ST 为空 = 不带参数 = 走主站，正好是「主网站保持原样」的默认行为。 */
+  /* ---------- 在看谁：可以是多位 ----------
+     顶栏那排色灯点亮谁就读谁的内容；点亮多位 = 把他们的回放合并成一条时间轴
+     （媒体接口只认 bvid/cid，与板块无关，所以合并只发生在「清单 + 分段」两处）。
+     存 xl_stations（JSON 数组）；旧版的单选 xl_station 读一次做迁移。
+     ST 仍是「主位」= 数组第一个 —— 直播间、弹幕、状态浮标、发弹幕这些
+     有明确指向的功能都按主位工作，避免「看着 A 却把弹幕发给了 B」。 */
+  var ST_KEY = 'xl_station';
+  var ST_SET_KEY = 'xl_stations';
+  var MAIN_KEY = 'xl_main_id';
+  var ST_SET = (function () {
+    try {
+      var raw = localStorage.getItem(ST_SET_KEY);
+      if (raw) {
+        var arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          return arr.filter(function (x) { return typeof x === 'string' && x; });
+        }
+      }
+      var one = localStorage.getItem(ST_KEY);      // 旧版单选 → 数组
+      if (one) return [one];
+    } catch (e) { /* 隐私模式 */ }
+    return [];
+  })();
+  var ST = ST_SET.length ? ST_SET[0] : '';
+  /* 主站 id：启动早期（板块列表还没拉回来）就要判断「是不是只有主站」，
+     所以缓存一份。拿不到时保守当成「不是纯主站」—— 最坏也只是多走一次接口。 */
+  var MAIN_ID = (function () {
+    try { return localStorage.getItem(MAIN_KEY) || ''; } catch (e) { return ''; }
+  })();
+
+  function findStation(id) {
+    var hit = null;
+    (STATIONS || []).forEach(function (s) { if (s.id === id) hit = s; });
+    return hit;
+  }
+
+  // 是否在混合播放（多位）。列表里的来源色点只在混合时出现 —— 单选时界面保持原样。
+  function isMixed() { return ST_SET.length > 1; }
+
+  /* 是否「只有主站」——决定能不能用页面内置的离线快照秒开。
+     多选时那份快照（只有主站内容）绝不能用，否则会把别人的内容替换掉。 */
+  function isMainOnly() {
+    if (!ST_SET.length) return true;
+    if (ST_SET.length > 1) return false;
+    return MAIN_ID ? ST_SET[0] === MAIN_ID : false;
+  }
+
+  function saveStations() {
+    try {
+      if (ST_SET.length) localStorage.setItem(ST_SET_KEY, JSON.stringify(ST_SET));
+      else localStorage.removeItem(ST_SET_KEY);
+      if (ST_SET.length === 1) localStorage.setItem(ST_KEY, ST_SET[0]);
+      else localStorage.removeItem(ST_KEY);
+    } catch (e) { /* 隐私模式 */ }
+  }
+  /* 哪些请求要带上 ?station= —— 也就是服务端**按板块**取数据的那些接口。
+     判断依据是服务端实现里用没用 cur_station()，不是「看起来像不像」。
+     ⚠ 新增按板块的接口时必须往这里加：漏了的后果不是报错，而是**静默地返回主站的数据**
+     （微博就漏过一次 —— 切到别的板块，微博页还是四时小路的内容，界面看起来完全正常）。
+     当前对应关系：
+       programs(清单) / segments/*(分段) / live/*(直播) / status-board(小路状态)
+       / weibo*(微博) / series(回放来源) —— 后两个是补上的。
+     不带 station 的：/api/status(B站登录态)、/api/stations(主播注册表)、
+       /api/img(图片代理)、/api/protocol、/api/ping —— 都是全局的。 */
+  var STATION_RE = new RegExp('^/api/(' + [
+    'programs',
+    'segments/',
+    'playurl', 'dashinfo', 'dash', 'stream',
+    'live/',
+    'status-board',
+    'weibo',
+    'series'
+  ].join('|') + ')');
+  /* ---------- 主题色：随「板块」（当前在看的主播）切换 ----------
+     每位主播在 data/stations.json 里有一个 accent。切换时把它写进 --red / --red-soft，
+     CSS 里注册过 @property，所以颜色是渐变过去的；再叠一层扫过动画。
+     accent 同时缓存到 localStorage —— 下次打开时首屏就能用对颜色，
+     否则会先闪一下默认红再变成目标色。 */
+  var ACCENT_KEY = 'xl_accent';
+
+  function themeHex(accent) {
+    var a = String(accent || '').trim();
+    if (/^#[0-9a-f]{6}$/i.test(a)) return a;
+    if (/^#[0-9a-f]{3}$/i.test(a)) return '#' + a[1] + a[1] + a[2] + a[2] + a[3] + a[3];
+    return '';
+  }
+
+  /* 底色/卡片底色 = 把主题色混进一点点到基础暗色里（线性插值，与 CSS 的
+     color-mix(in srgb, ...) 算法一致）。比例要和 style.css 的 :root 对上：
+     两边不一致的话，首屏（CSS 生效）到 JS 落地那一下会看见跳色。
+     注意不能只靠 CSS 的 color-mix 跟随 --red —— 那样属性自身的指定值没变，
+     transition 不一定会触发；这里显式给新值，过渡才稳。 */
+  var THEME_TINTS = [
+    ['--bg', '#08080a', 0.14],
+    ['--panel', '#101013', 0.10],
+    ['--panel-2', '#16161a', 0.09]
+  ];
+
+  function mixHex(base, accent, t) {
+    var b = themeHex(base), a = themeHex(accent);
+    if (!b || !a) return '';
+    var out = '#';
+    for (var i = 1; i <= 5; i += 2) {
+      var x = parseInt(b.substr(i, 2), 16);
+      var y = parseInt(a.substr(i, 2), 16);
+      var v = Math.round(x + (y - x) * t);
+      out += (v < 16 ? '0' : '') + v.toString(16);
+    }
+    return out;
+  }
+
+  function themeSweep(hex, x, y) {
+    if (!hex) return;
+    var vw = window.innerWidth, vh = window.innerHeight;
+    x = (typeof x === 'number' && isFinite(x)) ? x : vw / 2;
+    y = (typeof y === 'number' && isFinite(y)) ? y : 0;
+    // 半径要能盖住离它最远的那个角
+    var r = Math.ceil(Math.hypot(Math.max(x, vw - x), Math.max(y, vh - y))) + 40;
+    var d = document.createElement('div');
+    d.className = 'theme-sweep';
+    d.style.setProperty('--sweep', hex);
+    d.style.setProperty('--sx', x + 'px');
+    d.style.setProperty('--sy', y + 'px');
+    d.style.setProperty('--sweep-r', r + 'px');
+    d.innerHTML = '<i></i>';
+    document.body.appendChild(d);
+    requestAnimationFrame(function () { d.classList.add('on'); });
+    setTimeout(function () {
+      if (d.parentNode) d.parentNode.removeChild(d);
+    }, 1000);
+  }
+
+  function applyTheme(accent, from) {
+    var hex = themeHex(accent);
+    if (!hex) return false;
+    var rs = document.documentElement.style;
+    rs.setProperty('--red', hex);
+    rs.setProperty('--red-soft', hex + '24');      // 14% 左右，和原来的观感一致
+    // 底色与卡片底色：**只有副站上色**。主站移除内联值，回到 style.css 里的原色
+    // （也就是它本来那套黑红配色 —— 用户要求主站配色不要变）。
+    for (var t = 0; t < THEME_TINTS.length; t++) {
+      var tint = THEME_TINTS[t];
+      if (!ST_TINT) {
+        rs.removeProperty(tint[0]);
+        continue;
+      }
+      var mixed = mixHex(tint[1], hex, tint[2]);
+      if (mixed) rs.setProperty(tint[0], mixed);
+    }
+    try { localStorage.setItem(ACCENT_KEY, hex); } catch (e) { /* 隐私模式 */ }
+    // 顶栏那排灯的颜色来自各板块自己的 accent（inline --lc），不跟着当前主题走，
+    // 否则「点亮谁」就看不出来了 —— 所以这里不再需要刷新圆点颜色。
+    if (from) themeSweep(hex, from.x, from.y);
+    return true;
+  }
+
+  // 首屏立刻套用上次记住的颜色（不等 /api/stations 回来）
+  try { applyTheme(localStorage.getItem(ACCENT_KEY) || ''); } catch (e) { /* 忽略 */ }
+
+  function stq(u) {
+    if (!u || !STATION_RE.test(u) || u.indexOf('station=') >= 0) return u;
+    return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'station=' + encodeURIComponent(ST);
+  }
+
+  (function () {
+    var native = window.fetch.bind(window);
+    window.fetch = function (u, o) {
+      return native(typeof u === "string" ? stq(u) : u, o);
+    };
+  })();
+
+  var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'categories', 'weibo', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
 
   var store = {
@@ -243,6 +419,7 @@
 
   function setQualityList(list, cur) {
     if (!list || !list.length) return;
+    el.quality.disabled = false;      // 直播间里会被占位禁用，回放取到档位时要恢复
     el.quality.innerHTML = list.map(function (q) {
       return '<option value="' + q.qn + '"' + (q.qn === cur ? ' selected' : '') + '>'
         + q.desc + '</option>';
@@ -376,9 +553,12 @@
     }
 
     dashPlayer = dashjs.MediaPlayer().create();
+    // 只留这个版本真正认得的项：stableBufferTime（v3 的名字）在本包的 dash.js 里
+    // 已不存在，dash.js 会每次创建播放器都打一条 console.error 并忽略它。
+    // 缓冲区目标不在这里改 —— 当前 v4 默认（长片 60 秒）比原先写的 12 秒更抗网络抖动。
     dashPlayer.updateSettings({
       debug: { logLevel: dashjs.Debug.LOG_LEVEL_NONE },
-      streaming: { buffer: { stableBufferTime: 12, fastSwitchEnabled: false } }
+      streaming: { buffer: { fastSwitchEnabled: false } }
     });
     dashPlayer.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, function () {
       if (state.loadingKey !== key) return;
@@ -503,6 +683,14 @@
     return '/api/img?u=' + b64url(p.thumb.replace('@320w_200h_1c.webp', '@' + size));
   }
 
+  /* 列表里的「这条是谁的」小色点。只在混合播放时出现 ——
+     单选/主站时界面保持原样，一个字都不多。 */
+  function stMark(p) {
+    if (!isMixed() || !p._short) return '';
+    return '<span class="st-mark" style="--lc:' + esc(p._accent || '#8a8a95')
+      + '" title="来自 ' + esc(p._short) + '"></span>';
+  }
+
   function programRow(p) {
     return '<tr data-bvid="' + p.bvid + '">'
       + '<td class="col-title"><div class="cell-title">'
@@ -511,7 +699,7 @@
              + 'srcset="' + esc(thumbSrc(p, '160w_100h_1c.webp')) + ' 1x, '
              + esc(thumbSrc(p, '240w_150h_1c.webp')) + ' 1.5x, '
              + esc(thumbSrc(p, '320w_200h_1c.webp')) + ' 2x">'
-      + '<div class="tt"><span class="n">' + esc(p.title) + '</span>'
+      + '<div class="tt"><span class="n">' + stMark(p) + esc(p.title) + '</span>'
       + '<span class="d">' + p.date + ' · ' + p.parts.length + ' 个分P</span></div>'
       + '</div></td>'
       + '<td class="col-cat"><span class="tag t-' + p.category + '">' + p.category + '</span></td>'
@@ -524,6 +712,8 @@
   function filtered() {
     var q = state.q.toLowerCase();
     var list = state.all.filter(function (p) {
+      // 混合播放时可以从提示条里挑一位单独看（列表按时间倒序，某位可能排得靠后）
+      if (state.onlySrc && p._sid !== state.onlySrc) return false;
       if (Object.keys(state.cats).length && !state.cats[p.category]) return false;
       if (q && (p.title + ' ' + p.date + ' ' + p.category).toLowerCase().indexOf(q) < 0) return false;
       return true;
@@ -535,6 +725,7 @@
   }
 
   function renderList() {
+    renderMixedNote();          // 提示条里的「共 N 个节目」跟着清单走
     var list = filtered();
     var pages = Math.max(1, Math.ceil(list.length / CFG.pageSize));
     if (state.page > pages) state.page = pages;
@@ -606,7 +797,7 @@
       html += '<tr class="' + (r.live ? 'live-row' : '') + '" data-bvid="' + p.bvid + '">'
         + '<td class="col-time">' + timeCell + '</td>'
         + '<td class="col-title"><div class="cell-title">'
-        + '<div class="tt"><span class="n">' + esc(p.title) + '</span>'
+        + '<div class="tt"><span class="n">' + stMark(p) + esc(p.title) + '</span>'
         + '<span class="d">' + p.date + partNote + '</span></div>'
         + '</div></td>'
         + '<td class="col-cat"><span class="tag t-' + p.category + '">' + p.category + '</span></td>'
@@ -779,6 +970,12 @@
   var liveInit = false;
   var wheelTimer = null;
   var liveBusy = false;
+  // 常用弹幕：自定义的常用语，点一下直接发。存本机浏览器（与 xl_marks / xl_keys 同类），
+  // 服务端只收最终那条文本，所以这一侧不需要任何后端改动。
+  var QUICK_STORE = 'xl_quick';
+  var QUICK_MAX = 12;                     // 一行放得下的上限，再多会挤成一片
+  var QUICK_DEFAULT = ['丨吧宝宝'];        // 首次进入时给一条示例
+  var quickEdit = false;                  // 编辑模式：点标签即删除
 
   function postJSON(url, obj) {
     return fetch(url, {
@@ -829,17 +1026,24 @@
       }, 8000);
     });
     el.player.muted = state.muted;
-    try { livePlayer.play(); } catch (e) { /* 浏览器可能要求用户手势 */ }
+    // play() 返回的是 promise：浏览器要求用户手势、或在解析完成前又被 pause 打断时，
+    // 拒绝是异步发生的，try/catch 抓不到，会变成控制台里的未处理拒绝。
+    try {
+      var p = livePlayer.play();
+      if (p && typeof p.catch === 'function') p.catch(function () { /* 等用户手势 */ });
+    } catch (e) { /* 浏览器可能要求用户手势 */ }
   }
 
   function renderBroadcast() {
     if (!liveInit) {
       liveInit = true;
       bindLive();
-      el.liveQn.addEventListener('change', function () {
-        startLive(parseInt(el.liveQn.value, 10));
-      });
     }
+    // 直播间里播放器控制条那条下拉是**直播画质**（原画 / 蓝光 / 超清），
+    // 不是回放的分辨率 —— 先占位禁用，等 playinfo 回来再按实际档位填。
+    // 不占位的话，从频道页切过来会先闪一下回放的「1080P 高清」。
+    el.quality.innerHTML = '<option value="">直播画质载入中…</option>';
+    el.quality.disabled = true;
     // 先把回放彻底摘掉：留着 src 会停在回放的最后一帧上，看起来就像「直播间在放回放」
     destroyDash();
     destroyLive();
@@ -860,15 +1064,15 @@
   function loadLiveInfo() {
     fetch('/api/live/playinfo').then(function (r) { return r.json(); }).then(function (d) {
       var qnList = d.qualities || [];
-      el.liveQn.innerHTML = qnList.map(function (q) {
-        return '<option value="' + q.qn + '"' + (q.qn === d.current_qn ? ' selected' : '')
-          + '>' + esc(q.desc) + '</option>';
-      }).join('');
-      el.liveQnBox.hidden = !qnList.length;
+      // 直播画质就填在播放器控制条那条下拉里（位置与回放一致，切换直接重开直播流）。
+      // 直播间不再另放一个「清晰度」—— 同一个功能摆两处只会互相打架。
+      if (qnList.length) setQualityList(qnList, d.current_qn);
       if (!d.living) {
         el.liveInfo.innerHTML = '<b>未开播</b>';
+        el.quality.innerHTML = '<option value="">未开播</option>';
+        el.quality.disabled = true;
         chatStop();
-        liveOffline('小路现在没开播，这里只会显示直播画面。');
+        liveOffline(ST_SHORT + '现在没开播，这里只会显示直播画面。');
         return;
       }
       el.liveInfo.innerHTML = '<b>直播中</b> · ' + esc(d.title || '（无标题）')
@@ -911,9 +1115,11 @@
         .then(function () { liveBusy = false; });
     });
 
-    function sendOnce() {
+    function sendOnce(msg) {
       if (liveBusy) return;
-      var msg = el.liveMsg.value.trim();
+      // 传参时用参数（常用弹幕一键发送走这条路，不经过输入框），不传时取输入框
+      if (msg === undefined) msg = el.liveMsg.value;
+      msg = String(msg).trim();
       if (!msg) { el.liveResult.textContent = '先输入弹幕内容'; return; }
       liveBusy = true;
       el.liveSend.disabled = true;
@@ -925,9 +1131,74 @@
         .catch(function () { el.liveResult.textContent = '发送失败，请重试'; })
         .then(function () { liveBusy = false; el.liveSend.disabled = false; });
     }
-    el.liveSend.addEventListener('click', sendOnce);
+    el.liveSend.addEventListener('click', function () { sendOnce(); });
     el.liveMsg.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') sendOnce();
+    });
+
+    /* ---- 常用弹幕：一键发送。列表只存本机浏览器，服务端只收最终那条文本 ---- */
+
+    function quickList() {
+      var v = store.get(QUICK_STORE, null);
+      return Array.isArray(v) ? v : [];
+    }
+
+    function renderQuick() {
+      var list = quickList();
+      el.quickRow.hidden = !list.length && !quickEdit;
+      el.quickLabel.textContent = quickEdit ? '点标签删除' : '常用';
+      el.quickEdit.hidden = !list.length;
+      el.quickEdit.textContent = quickEdit ? '完成' : '编辑';
+      // 用下标而不是文本做标识：文本要进 HTML，下标不用，省掉一层转义风险
+      el.quickChips.innerHTML = list.map(function (t, i) {
+        return '<button type="button" class="quick-chip' + (quickEdit ? ' editing' : '')
+          + '" data-qi="' + i + '" title="'
+          + (quickEdit ? '点击删除' : '点击发送') + '">' + esc(t)
+          + (quickEdit ? '<i class="qc-x">×</i>' : '') + '</button>';
+      }).join('');
+    }
+
+    function addQuick() {
+      var t = el.liveMsg.value.trim();
+      if (!t) { el.liveResult.textContent = '先在上面输入要用作常用的弹幕'; return; }
+      var list = quickList();
+      if (list.indexOf(t) >= 0) {
+        el.liveResult.textContent = '「' + t + '」已经在常用里了';
+        return;
+      }
+      if (list.length >= QUICK_MAX) {
+        el.liveResult.textContent = '常用最多 ' + QUICK_MAX + ' 条，先删掉几条再存';
+        return;
+      }
+      list.push(t);
+      store.set(QUICK_STORE, list);
+      renderQuick();
+      el.liveResult.textContent = '已存为常用：「' + t + '」';
+    }
+
+    // 只在「从没存过」时写入示例，用户清空后不会再冒出来
+    if (store.get(QUICK_STORE, null) === null) store.set(QUICK_STORE, QUICK_DEFAULT);
+    renderQuick();
+
+    el.liveMsgSave.addEventListener('click', addQuick);
+    el.quickEdit.addEventListener('click', function () {
+      quickEdit = !quickEdit;
+      renderQuick();
+    });
+    el.quickChips.addEventListener('click', function (e) {
+      var b = e.target.closest('.quick-chip');
+      if (!b) return;
+      var list = quickList();
+      var t = list[parseInt(b.getAttribute('data-qi'), 10)];
+      if (!t) return;
+      if (quickEdit) {
+        list.splice(list.indexOf(t), 1);
+        store.set(QUICK_STORE, list);
+        if (!list.length) quickEdit = false;    // 删空了就退出编辑模式，别留一个空壳
+        renderQuick();
+      } else {
+        sendOnce(t);
+      }
     });
 
     el.wheelStart.addEventListener('click', function () {      if (liveBusy) return;
@@ -976,6 +1247,7 @@
       el.wheelToggle.textContent = d.running
         ? '独轮车 · ' + d.sent + '/' + d.total : '独轮车';
       el.wheelToggle.classList.toggle('primary', !!d.running);
+      if (d.motto) el.wheelMotto.textContent = d.motto;
       if (!d.running) {
         if (d.reason) {
           el.wheelState.textContent = d.reason;
@@ -1027,7 +1299,9 @@
   function chatStart() {
     if (chatEs) return;
     el.liveChatState.textContent = '连接中…';
-    chatEs = new EventSource('/api/live/chat/stream');
+    // 必须自己带上 station：stq() 包装的是 window.fetch，管不到 EventSource。
+    // 不带的话副站的直播间会订阅到**主站**的弹幕（主站没播就是空面板）。
+    chatEs = new EventSource(stq('/api/live/chat/stream'));
     chatEs.onopen = function () { el.liveChatState.textContent = '已连接 · 实时弹幕中'; };
     chatEs.onmessage = function (ev) {
       var j;
@@ -1135,6 +1409,30 @@
       postJSON('/api/segments/auto', { on: el.segAuto.checked }).then(segPoll);
     });
 
+    // 回放清单：强制重新发现（改了 UID / 换了系列后用）。all=true 刷全部 ——
+    // 服务端会在每位之间留间隔，避免被 B 站风控挡下
+    if (el.seriesRefresh) {
+      el.seriesRefresh.addEventListener('click', function () {
+        var tip = document.getElementById('series-state');
+        el.seriesRefresh.disabled = true;
+        if (tip) tip.textContent = '正在重新获取（逐个主播、每位之间留间隔，约十几秒）…';
+        postJSON('/api/series/refresh', { all: true })
+          .then(function (d) {
+            var fails = ((d && d.results) || []).filter(function (x) { return x.error; });
+            if (tip) {
+              tip.textContent = fails.length
+                ? '部分失败：' + fails.map(function (x) {
+                    return x.id + '（' + x.error + '）';
+                  }).join('；')
+                : '已重新获取 ✓';
+            }
+            seriesPoll();
+          })
+          .catch(function () { if (tip) tip.textContent = '请求失败，请重试'; })
+          .then(function () { el.seriesRefresh.disabled = false; });
+      });
+    }
+
     el.segRun.addEventListener('click', function () {
       var p = state.all && state.all[0];
       if (!p) { el.segState.textContent = '节目单还没载入'; return; }
@@ -1142,6 +1440,27 @@
         el.segState.textContent = d.error ? d.error : ('已排队：' + p.title);
         segPoll();
       });
+    });
+
+    // 书签模式：直连（零提示但不能启动程序）/ 协议（能启动，首次要过浏览器授权）
+    el.protoDirect.addEventListener('change', function () {
+      protoDirect = el.protoDirect.checked;
+      store.set(KEY_PROTO_DIRECT, protoDirect);
+      renderProtoLink();
+      protoPoll();
+    });
+
+    // 桌面快捷方式：比书签更彻底 —— 直接指向 EXE、不经过浏览器，零授权零提示
+    el.shortcutCreate.addEventListener('click', function () {
+      el.shortcutState.textContent = '正在创建…';
+      el.shortcutCreate.disabled = true;
+      postJSON('/api/shortcut/create', {}).then(function (d) {
+        el.shortcutState.textContent = d.error
+          ? d.error
+          : '已创建：' + d.path + '\n双击它就会启动程序并打开网页（已在运行时直接打开页面）。';
+      }).catch(function () {
+        el.shortcutState.textContent = '创建失败，请重试。';
+      }).then(function () { el.shortcutCreate.disabled = false; });
     });
 
     // 自定义协议：注册后书签 komichi://open 就能拉起本程序
@@ -1157,6 +1476,10 @@
         protoPoll();
       });
     });
+    // 拿不到 /api/protocol（服务刚起或离线）时也要先把书签与说明按当前模式渲染出来，
+    // 否则链接会停在 href="#" 的空壳上
+    el.protoDirect.checked = protoDirect;
+    renderProtoLink();
 
     el.keysList.addEventListener('click', function (e) {
       var del = e.target.closest('[data-key-del]');
@@ -1230,6 +1553,28 @@
     el.keysTip.textContent = '正在录制「' + actionName(id) + '」，请按下要用的组合键。';
   }
 
+  /* 回放来源状态：每位主播各自「自动发现到了哪个系列 / 为什么没拿到」 */
+  function seriesPoll() {
+    var tip = document.getElementById('series-state');
+    if (!tip) return;
+    fetch('/api/stations').then(function (r) { return r.json(); }).then(function (d) {
+      var rows = ((d && d.stations) || []).map(function (s) {
+        var sr = s.series || {};
+        var tail;
+        if (sr.id) {
+          tail = '系列 ' + sr.id + (sr.total ? ' · ' + sr.total + ' 场' : '')
+            + '（' + (sr.source === 'config' ? 'stations.json 手填' : '自动发现') + '）';
+        } else if (sr.error) {
+          tail = '没拿到：' + sr.error;
+        } else {
+          tail = '还没拿到，后台重试中';
+        }
+        return (s.short || s.name) + '：' + tail;
+      });
+      tip.textContent = rows.join('\n');
+    }).catch(function () { tip.textContent = '读不到回放来源状态（服务未启动？）'; });
+  }
+
   function renderSettings() {
     bindSettings();
     el.keysList.innerHTML = KEY_ACTIONS.map(function (a) {
@@ -1244,23 +1589,84 @@
         + ' data-key-del="' + a.id + '"' + (c ? '' : ' hidden') + '>×</button>'
         + '</div>';
     }).join('');
-    segPoll();
     protoPoll();
-    if (!segTimer) segTimer = setInterval(segPoll, 4000);
+    seriesPoll();
+  }
+
+  // 书签两种模式：
+  //   直连 —— 书签指向 http://127.0.0.1:8765/，点一下直接进网页、零提示；
+  //           但**只能打开已经在运行的程序，不能启动它**。http:// 是浏览器保留协议，
+  //           技术上无法关联到本地 EXE（否则恶意网页就能拉起任意本地程序），
+  //           所以「直连 + 能启动」在浏览器里不可能同时成立 —— 这是安全边界，不是实现问题。
+  //   协议 —— 书签指向 komichi://open，程序没在跑也能一点拉起；代价是浏览器会先问一次
+  //           「要打开二十四时小路电台吗」。那是浏览器给出的确认框，网页关不掉。
+  // 想要「一点就进 + 完全没有任何提示」，正解是**桌面快捷方式**（见设置页）：
+  // 它直接指向 EXE、不经过浏览器，因此不存在授权那一层。
+  /* 键名带 _v2：旧的 `xl_proto_direct`（默认直连那版）在用户浏览器里可能已经存了 true
+     （只要点过一次开关就会落盘），沿用旧键名会让新的默认值失效、仍停在直连模式。
+     换键名让旧值自然作废 —— 反正旧默认值本身就是要纠正的设计。 */
+  var KEY_PROTO_DIRECT = 'xl_proto_direct_v2';
+  var PROTO_URL = 'komichi://open';
+  var protoAutoTried = false;
+  /* 默认「协议模式」而不是「直连」：直连书签虽然零提示，但它**打不开没在运行的电台**
+     —— 刚开机点书签只会得到「无法连接」，用户被卡住且找不到入口
+     （旧版直连时还把「注册 / 修复」按钮藏了）。书签的第一职责是「能把程序启动起来」，
+     所以默认走协议书签；想零提示的用户可以切直连，代价在界面上写清楚。 */
+  var protoDirect = store.get(KEY_PROTO_DIRECT, false) === true;
+
+  function renderProtoLink(url) {
+    if (protoDirect) {
+      el.protoLink.setAttribute('href', location.origin + '/');
+      el.protoLink.textContent = '▶ 打开小路电台（直连）';
+      el.protoHint.innerHTML = '直连：点书签直接进网页、没有任何提示。'
+        + '但它<b>只能打开已经在运行的电台，不能把程序启动起来</b> —— '
+        + '程序没在跑（比如刚开机）时点它会提示打不开。'
+        + '要让书签也能启动程序，请关掉上面这个开关。';
+    } else {
+      el.protoLink.setAttribute('href', url || PROTO_URL);
+      el.protoLink.textContent = '▶ 启动小路电台';
+      el.protoHint.innerHTML = '协议模式：程序没在跑时，点书签也能把它<b>启动起来</b>。'
+        + '代价是浏览器会先问一次「要打开二十四时小路电台吗」——'
+        + '弹窗里若有「<b>始终允许</b>」就勾上，多数情况下以后不再问。'
+        + '（这个确认框是浏览器的安全边界，网页关不掉；若你的浏览器每次都问，'
+        + '就用下面的<b>桌面快捷方式</b> —— 那条路完全没有任何提示。）';
+    }
   }
 
   function protoPoll() {
     fetch('/api/protocol').then(function (r) { return r.json(); }).then(function (d) {
-      el.protoLink.setAttribute('href', d.url);
-      el.protoLink.textContent = '▶ 启动小路电台（' + d.url + '）';
+      el.protoDirect.checked = protoDirect;
+      renderProtoLink(d.url);
+      /* 协议模式下若还没注册就自动注册一次：不注册的话那块注册表项不存在，
+         点协议书签浏览器会「找不到关联程序」，书签等于废的。
+         只写 HKEY_CURRENT_USER、不需要管理员权限，随时可用「取消注册」撤销。
+         只自动试一次，失败就交回给用户手点，避免反复重试。 */
+      if (!protoDirect && d.supported && !d.registered && !protoAutoTried) {
+        protoAutoTried = true;
+        el.protoState.textContent = '正在自动注册协议…';
+        postJSON('/api/protocol/register', {}).then(function (r2) {
+          if (r2.error) { el.protoState.textContent = '自动注册失败：' + r2.error; return; }
+          protoPoll();
+        }).catch(function () {
+          el.protoState.textContent = '自动注册失败，请点上面的「注册 / 修复」。';
+        });
+        return;
+      }
       var s;
-      if (!d.supported) {
+      if (protoDirect) {
+        s = '当前：直连书签（点击零提示，但程序必须已经在运行、不能启动程序）。'
+          + (d.supported
+             ? '协议目前' + (d.registered ? '已注册' : '未注册') + '，切回协议模式才会用到它。'
+             : '源码运行模式：协议不需要注册（注册的目标得是本程序的 EXE）。');
+      } else if (!d.supported) {
         s = '源码运行模式：不需要注册（注册的目标得是本程序的 EXE）。';
       } else if (d.registered) {
-        s = '已注册 ✓ 书签可以直接启动本程序。\n'
-          + '如果还没加书签：把上面那个链接拖到书签栏即可。';
+        s = '已注册 ✓ 这条书签能把程序启动起来。\n'
+          + '还没加书签的话：把上面那条链接拖到书签栏即可；'
+          + '首次点击时浏览器会问一次，弹窗里有「始终允许」就勾上。\n'
+          + '想完全不要提示：点下面的「创建桌面快捷方式」。';
       } else {
-        s = '未注册 —— 先点「注册 / 修复」，书签才能启动程序。\n'
+        s = '未注册 —— 点上面的「注册 / 修复」，书签才能启动程序。\n'
           + '（只写 HKEY_CURRENT_USER，不需要管理员权限）';
       }
       el.protoState.textContent = s;
@@ -1268,6 +1674,7 @@
   }
 
   var segTimer = null;
+  var segBusy = false;
 
   function segPoll() {
     fetch('/api/segments/status').then(function (r) { return r.json(); }).then(function (d) {
@@ -1279,6 +1686,7 @@
       if (d.running) line += ' · 正在处理 ' + (d.current || '');
       else if ((d.queue || []).length) line += ' · 排队 ' + d.queue.length + ' 个';
       el.segNote.textContent = line;
+      segBar(d, cov);
 
       var out = [];
       if (d.error) out.push('错误：' + d.error);
@@ -1293,6 +1701,128 @@
       }
       el.segState.textContent = out.join('\n');
     }).catch(function () { /* 服务未起时静默 */ });
+  }
+
+  /* -------------------------------------------- 主界面：分段数据栏 */
+
+  // 副行：正在跑就显示进度，否则显示「上次更新」——这两件事是轮流占用同一行的，
+  // 因为用户在这一行只想问「数据是新的吗」。
+  // 时间取持久化记录（seg_state.json），不用 segments.js 的 mtime：
+  // 每次启动/换版本都会重写那个文件，mtime 会变成「刚刚」，等于撒谎。
+  function segWhenText(d) {
+    var queue = (d.queue || []).length;
+    if (d.running || queue) {
+      return '正在更新：还有 ' + (queue + (d.running ? 1 : 0)) + ' 个投稿排队'
+        + (d.current ? '（当前 ' + d.current + '）' : '');
+    }
+    if (!d.ffmpeg) return '本机没找到 ffmpeg，分段功能不可用';
+    var last = d.last || {};
+    if (!last.at) return '尚未更新过 —— 点右侧按钮开始识别分段';
+    var g = new Date(last.at * 1000);
+    var today = new Date();
+    var stamp = (g.toDateString() === today.toDateString())
+      ? hhmm(g)
+      : (g.getMonth() + 1) + '-' + pad2(g.getDate()) + ' ' + hhmm(g);
+    if (!last.ok) return '上次更新失败（' + stamp + '）：' + (last.error || '未知错误');
+    return '上次更新：' + stamp + ' · 新算 ' + (last.processed || 0) + ' 个分P'
+      + (last.title ? ' · ' + last.title : '');
+  }
+
+  function segBar(d, cov) {
+    var total = cov.total || 0, have = cov.have || 0;
+    el.segCov.textContent = '分段数据：' + have + ' / ' + total + ' 个分P'
+      + (total ? '（' + Math.round(have * 100 / total) + '%）' : '')
+      + ' · ' + fmtNum(cov.segments || 0) + ' 段';
+    el.segBtn.disabled = segBusy || !d.ffmpeg;
+    el.segWhen.textContent = segWhenText(d);
+    segProgress(d);
+  }
+
+  function durText(sec) {
+    sec = Math.max(0, Math.round(sec));
+    if (sec < 60) return sec + ' 秒';
+    if (sec < 3600) return Math.floor(sec / 60) + ' 分 ' + pad2(sec % 60) + ' 秒';
+    return Math.floor(sec / 3600) + ' 小时 ' + Math.floor((sec % 3600) / 60) + ' 分';
+  }
+
+  // 识别进度条：数字全部来自分析循环的实时上报（analyzed/total），
+  // 剩余时间用「已完成音频秒数 / 已耗时」的实测速率推算 —— 不是拍脑袋。
+  function segProgress(d) {
+    var busy = d.running || ((d.queue || []).length > 0);
+    if (!busy) { el.segProg.hidden = true; return; }
+    el.segProg.hidden = false;
+
+    var p = d.progress || {}, b = d.batch || {};
+    // 音频与「已唱」浮层精修是并行的，各自上报各自的进度：
+    // 工作量 = 音频已分析秒数 + 精修按同样长度折算，总工作量 = 音频总秒数 × phases。
+    var at = p.audio_total || 0;
+    var ad = Math.min(p.analyzed || 0, at || Infinity);
+    var rr = p.refine_ratio || 0;
+    var ph = p.phases || 1;
+    var frac = null;
+    var sub = at ? (ad + rr * at) / (at * ph) : 0;
+    // 条的口径是「整批」：(已完成投稿数 + 当前投稿内的进度) / 总投稿数。
+    // 这样跨分P、跨投稿都只增不减 —— 否则每个分P 跑完都会从 100% 跳回小百分比。
+    var total = p.total || 0;
+    if (b.total) {
+      frac = (Math.min(b.done || 0, b.total)
+        + (p.part_index ? ((p.part_index - 1) + sub) / p.parts : 0)) / b.total;
+    } else if (p.part_index && p.parts) {
+      frac = ((p.part_index - 1) + sub) / p.parts;
+    } else if (total) {
+      frac = sub;
+    }
+    if (frac !== null) {
+      el.segProgFill.style.width = Math.max(1, Math.round(Math.min(1, Math.max(0, frac)) * 100)) + '%';
+    }
+
+    var out = [];
+    if (b.total) out.push('第 ' + Math.min((b.done || 0) + 1, b.total) + ' / ' + b.total + ' 个投稿');
+    if (p.parts > 1) out.push('分P ' + (p.part_index || 1) + '/' + p.parts);
+    // 数字按「音频秒」显示，精修单独给百分比 —— 总进度（含精修）看条就够了，
+    // 不把工作量口径（音频秒×phases）直接当秒数写出来误导人
+    if (at) {
+      out.push(ad < at ? ('音频 ' + fmtNum(ad) + ' / ' + fmtNum(at) + ' 秒')
+                       : '音频 100%');
+      if (ph > 1) out.push('浮层 ' + Math.round(rr * 100) + '%');
+    }
+    if (p.title && b.total > 1) out.push(p.title);
+    out.push(p.stage || '准备中');
+
+    // 速率要跑够一会儿才稳定，起步阶段先不给预计时间，免得数字乱跳
+    var rate = (d.elapsed || 0) > 10 ? (d.done_seconds || 0) / d.elapsed : 0;
+    if (rate > 0 && d.todo_seconds > 0) out.push('预计还需 ' + durText(d.todo_seconds / rate));
+    else if (d.todo_seconds > 0) out.push('剩余约 ' + durText(d.todo_seconds) + ' 音频');
+    el.segProgText.textContent = out.join(' · ');
+  }
+
+  // 「更新数据」：手动跑一次分段扫描，把所有还缺分段的分P 补齐（新回放优先）。
+  // 与设置页的自动开关无关 —— 这是用户显式点的，不受 auto 与水位线限制。
+  function segRefresh() {
+    if (segBusy) return;
+    segBusy = true;
+    el.segBtn.disabled = true;
+    el.segBtnText.textContent = '更新中…';
+    var reset = function () {
+      segBusy = false;
+      el.segBtn.disabled = false;
+      el.segBtnText.textContent = '更新数据';
+    };
+    postJSON('/api/segments/refresh', {}).then(function (d) {
+      reset();
+      if (!d.ok) { el.segWhen.textContent = d.error || '更新失败'; return; }
+      if (!d.queued) {
+        el.segWhen.textContent = d.missing_parts
+          ? ('这 ' + d.missing_parts + ' 个分P 已在更新队列里')
+          : '已是最新，没有缺分段的分P';
+        return;
+      }
+      el.segWhen.textContent = '已排队 ' + d.queued + ' 个投稿（'
+        + d.missing_parts + ' 个分P 待识别），正在后台更新…';
+    }).catch(function (e) {
+      reset();
+      el.segWhen.textContent = '更新失败：' + (e && e.message ? e.message : e);
+    });
   }
 
   /* ---------------------------------------------------------- 页面存活上报 */
@@ -1333,6 +1863,24 @@
       if (s) s.classList.toggle('active', v === name);
     });
 
+    // 监控室：切进来时才接流（不在首页就连 4 路，省带宽也省对面服务器）
+    if (name === 'multi') { bindMulti(); renderMulti(); }
+    // 微博：切进来时才取（微博接口慢又是外部服务，没必要在首页就拉）
+    if (name === 'weibo') { bindWeibo(); renderWeibo(); }
+
+    // 真的换了页面就从顶部看起 —— 否则在列表里滚了几屏之后切到设置页，
+    // 会直接落到那一页的中段（实测停在 1127px，用户以为自己点错了）。
+    if (prev !== name) window.scrollTo(0, 0);
+
+    // 窄屏的标签条是横向滚动的（1080px 以上才会全部平铺），
+    // 把当前页签滚进可见区，不然「设置」这种末尾项永远看不见。
+    var act = document.querySelector('.tab.active');
+    var strip = act && act.parentNode;
+    if (act && strip && strip.scrollWidth > strip.clientWidth + 1) {
+      var ar = act.getBoundingClientRect(), sr = strip.getBoundingClientRect();
+      strip.scrollLeft += (ar.left - sr.left) - (sr.width - ar.width) / 2;
+    }
+
     if (name === 'live') renderList();
     else if (name === 'broadcast') renderBroadcast();
     else if (name === 'schedule') renderSchedule();
@@ -1348,7 +1896,11 @@
         wheelTimer = null;
       }
     }
-    if (name !== 'settings' && segTimer) {
+    // 分段状态轮询：主界面要显示覆盖率与「上次更新」，设置页要显示日志与开关
+    if (name === 'live' || name === 'settings') {
+      segPoll();
+      if (!segTimer) segTimer = setInterval(segPoll, 4000);
+    } else if (segTimer) {
       clearInterval(segTimer);
       segTimer = null;
     }
@@ -1709,7 +2261,10 @@
     var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     var timer = setTimeout(function () { if (ctl) ctl.abort(); }, 5000);
     var opt = ctl ? { signal: ctl.signal } : {};
-    return fetch('/api/status', opt)
+    // 这里只要确认「本机服务在不在」——用 /api/ping（纯本机、零上游请求）。
+    // 原来打的是 /api/status，而它每次都会去问 B 站的 nav（约 100~150ms），
+    // 于是每次加载都白等两次上游往返，正好和播放器抢带宽。
+    return fetch('/api/ping', opt)
       .then(function (r) {
         clearTimeout(timer);
         if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1750,7 +2305,10 @@
     seenPub: null          // 上次见到的最新投稿时间戳，用来判断「有新内容」
   };
 
-  var STATUS_SEEN_KEY = 'komichi.seenPub';
+  /* 「已读水位」必须按板块分开存：共用一份的话，切到副站时水位还是主站的时间戳，
+     对方最新几集会被全部标成「新」（假红点）。 */
+  var STATUS_SEEN_BASE = 'komichi.seenPub';
+  function statusSeenKey() { return STATUS_SEEN_BASE + ':' + (ST || 'main'); }
 
   function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 隐私模式忽略 */ } }
@@ -1765,13 +2323,13 @@
   function hasNewContent() {
     var p = newPrograms(1)[0];
     if (!p) return false;
-    var seen = parseInt(lsGet(STATUS_SEEN_KEY) || '0', 10) || 0;
+    var seen = parseInt(lsGet(statusSeenKey()) || '0', 10) || 0;
     return seen > 0 && p.pubdate > seen;
   }
 
   function markSeen() {
     var p = newPrograms(1)[0];
-    if (p) lsSet(STATUS_SEEN_KEY, String(p.pubdate));
+    if (p) lsSet(statusSeenKey(), String(p.pubdate));
   }
 
   function relDay(ts) {
@@ -1822,7 +2380,7 @@
     // ② 最新回放（有新投稿时打标）
     var recent = newPrograms(3);
     if (recent.length) {
-      var seen = parseInt(lsGet(STATUS_SEEN_KEY) || '0', 10) || 0;
+      var seen = parseInt(lsGet(statusSeenKey()) || '0', 10) || 0;
       html += '<div class="status-block">'
         + '<div class="status-block-h">最新回放</div>';
       recent.forEach(function (p) {
@@ -1894,7 +2452,7 @@
         statusState.loading = false;
         el.statusLoading.hidden = true;
         el.statusBody.innerHTML = '<div class="status-block"><div class="status-err">'
-          + '拿不到小路状态：' + esc(e && e.message ? e.message : String(e))
+          + '拿不到' + FAB_LABEL + '：' + esc(e && e.message ? e.message : String(e))
           + '<br><br>请确认通过 <code>启动.bat</code> 打开页面（本机服务未启动时无法取数据）。'
           + '</div></div>';
         el.statusFoot.innerHTML = '<span>—</span>';
@@ -1929,8 +2487,10 @@
     if (qrTimer) { clearInterval(qrTimer); qrTimer = null; }
   }
 
-  function refreshStatus() {
-    fetch('/api/status').then(function (r) { return r.json(); }).then(function (d) {
+  function refreshStatus(force) {
+    // 服务端缓存 30 秒；登录/登出之后必须拿新的，所以那两处传 true
+    fetch('/api/status' + (force ? '?refresh=1' : ''))
+      .then(function (r) { return r.json(); }).then(function (d) {
       el.loginLabel.textContent = d.logged ? (d.uname || '已登录') : '登录';
       el.btnLogin.setAttribute('title', d.logged
         ? ('已登录：' + (d.uname || '') + (d.vip ? '（大会员）' : ''))
@@ -1974,7 +2534,7 @@
                 : '登录成功，正在按新清晰度重新加载…';
               setTimeout(function () {
                 loginClose();
-                refreshStatus();
+                refreshStatus(true);
                 refreshLiveCred();     // 弹幕凭据随登录一起到手，立刻反映到直播间页
                 state.mediaBase = null;
                 applyPlayer(true);
@@ -2063,6 +2623,9 @@
     el.statusFab.addEventListener('click', statusToggle);
     el.btnStatusClose.addEventListener('click', statusClose);
     el.btnStatusRefresh.addEventListener('click', function () { loadStatus(true); });
+
+    // 主界面「更新数据」：手动跑一次分段（补齐所有缺分段的分P）
+    el.segBtn.addEventListener('click', segRefresh);
 
     document.addEventListener('click', function (e) {
       if (!statusState.open) return;
@@ -2174,13 +2737,19 @@
       syncSound();
     });
 
-    // 清晰度：重新取该清晰度的流，并从当前位置继续，不离开本页
+    // 清晰度下拉：直播间里它是**直播画质**（原画/蓝光/超清），换挡要重开直播流；
+    // 其它页面是回放分辨率，重新取该清晰度的流并从当前位置继续，都不离开本页
     el.quality.addEventListener('change', function () {
+      var qn = parseInt(el.quality.value, 10);
+      if (state.view === 'broadcast') {
+        if (qn) startLive(qn);
+        return;
+      }
       var seg = state.cycle.segments[state.segIndex];
       if (!seg) return;
       var anchor = cyclePos();               // 当前频道位置（视频未就绪时用期望位置）
       var keep = seg.t0 + Math.max(0, anchor - seg.start);
-      state.qn = parseInt(el.quality.value, 10) || 80;
+      state.qn = qn || 80;
       store.set('xl_qn', state.qn);
       loadMedia(seg, keep, anchor);
     });
@@ -2290,7 +2859,7 @@
     el.btnLogin2.addEventListener('click', function () { toggleQuality(false); openLogin(); });
     el.btnLoginClose.addEventListener('click', loginClose);
     el.btnLogout.addEventListener('click', function () {
-      fetch('/api/logout').then(function () { return refreshStatus(); }).then(function () {
+      fetch('/api/logout').then(function () { return refreshStatus(true); }).then(function () {
         state.mediaBase = null;
         applyPlayer(true);
       });
@@ -2425,11 +2994,19 @@
     // 明确写出来，用户能一眼看出看到的是不是最新数据。
     var when = '';
     if (state.meta.generated_at) {
-      var g = new Date(state.meta.generated_at * 1000);
-      when = state.meta.live
-        ? ' · 实时数据 ' + hhmm(g)
-        : ' · 快照于 ' + (g.getMonth() + 1) + '-' + pad2(g.getDate())
-          + ' ' + hhmm(g);
+      // 实时抓取给的是 epoch 秒（数字），内置的离线快照给的是
+      // 「YYYY-MM-DD HH:MM:SS」字符串（tools/collect.py 写的）。
+      // 一律按 epoch 乘 1000 就会得到 Invalid Date，页面上显示成 NaN-NaN NaN:NaN。
+      var raw = state.meta.generated_at;
+      var g = typeof raw === 'number'
+        ? new Date(raw * 1000)
+        : new Date(String(raw).replace(' ', 'T'));
+      if (!isNaN(g.getTime())) {
+        when = state.meta.live
+          ? ' · 实时数据 ' + hhmm(g)
+          : ' · 快照于 ' + (g.getMonth() + 1) + '-' + pad2(g.getDate())
+            + ' ' + hhmm(g);
+      }
     }
     el.meta.textContent = '数据源：' + (state.meta.up_name || '')
       + ' · 系列「直播回放」 · ' + state.meta.count + ' 个节目' + when;
@@ -2453,6 +3030,7 @@
     });
 
     route();
+    prefetchOthers();                     // 空闲预热其它板块（切过去就不用现抓）
     if (store.get('xl_lang') === 'zh-Hant') setLang('zh-Hant', true);
     checkServer().then(function () {
       if (state.offline) return;        // 没有服务就不去取流，避免一堆无谓的失败请求
@@ -2486,15 +3064,27 @@
     keysReset: document.getElementById('keys-reset'),
     segAuto: document.getElementById('seg-auto'),
     segRun: document.getElementById('seg-run'),
+    seriesRefresh: document.getElementById('series-refresh'),
+    seriesState: document.getElementById('series-state'),
     segNote: document.getElementById('seg-note'),
     segState: document.getElementById('seg-state'),
+    segCov: document.getElementById('seg-cov'),
+    segWhen: document.getElementById('seg-when'),
+    segBtn: document.getElementById('btn-seg-refresh'),
+    segBtnText: document.getElementById('seg-btn-text'),
+    segProg: document.getElementById('seg-prog'),
+    segProgFill: document.getElementById('seg-prog-fill'),
+    segProgText: document.getElementById('seg-prog-text'),
     protoLink: document.getElementById('proto-link'),
+    protoHint: document.getElementById('proto-hint'),
+    protoDirect: document.getElementById('proto-direct'),
+    protoRegBtns: document.getElementById('proto-regbtns'),
+    shortcutCreate: document.getElementById('shortcut-create'),
+    shortcutState: document.getElementById('shortcut-state'),
     protoReg: document.getElementById('proto-reg'),
     protoUnreg: document.getElementById('proto-unreg'),
     protoState: document.getElementById('proto-state'),
     liveInfo: document.getElementById('live-info'),
-    liveQn: document.getElementById('live-qn'),
-    liveQnBox: document.getElementById('live-qn-box'),
     liveChat: document.getElementById('live-chat'),
     liveChatState: document.getElementById('live-chat-state'),
     liveCredState: document.getElementById('live-cred-state'),
@@ -2503,8 +3093,14 @@
     liveJctSave: document.getElementById('live-jct-save'),
     liveMsg: document.getElementById('live-msg'),
     liveSend: document.getElementById('live-send'),
+    liveMsgSave: document.getElementById('live-msg-save'),
+    quickRow: document.getElementById('quick-row'),
+    quickLabel: document.getElementById('quick-label'),
+    quickChips: document.getElementById('quick-chips'),
+    quickEdit: document.getElementById('quick-edit'),
     liveResult: document.getElementById('live-result'),
     wheelMsg: document.getElementById('wheel-msg'),
+    wheelMotto: document.getElementById('wheel-motto'),
     wheelInterval: document.getElementById('wheel-interval'),
     wheelCount: document.getElementById('wheel-count'),
     wheelStart: document.getElementById('wheel-start'),
@@ -2585,6 +3181,8 @@
       statusDock: document.getElementById('status-dock'),
       statusFab: document.getElementById('status-fab'),
       statusFabDot: document.getElementById('status-fab-dot'),
+      statusFabText: document.getElementById('status-fab-text'),
+      statusPanelTitle: document.getElementById('status-panel-title'),
       statusPanel: document.getElementById('status-panel'),
       statusBody: document.getElementById('status-body'),
       statusLoading: document.getElementById('status-loading'),
@@ -2594,6 +3192,7 @@
     };
 
     bind();
+    playArrivalSweep();
 
     // 数据来源优先级：
     //   ① /api/programs —— 由本机服务实时抓 B 站，打开页面即拿到最新投稿
@@ -2601,6 +3200,14 @@
     //   ③ data/programs.json —— 最后兜底
     // 用「带超时的 Promise 竞速」而不是纯 fetch：接口卡住时不该让首屏一直转圈。
     function loadLocal() {
+      /* 内置的这两份离线快照都是**主站（四时小路）**的。
+         切到别的主播时拿它兜底 = 屏幕上写着羽啾、内容却是小路的，属于显示错人，
+         所以副站一律返回空清单，让页面明确停在「这位还没有回放数据」上。 */
+      /* 页面内置的那份快照只有主站的内容。多选时哪怕含主站也不能用它兜底 ——
+         会把别人的内容顶掉，屏幕上就成了「选了两位、只显示一位」。 */
+      if (!isMainOnly()) {
+        return Promise.resolve({ programs: [], meta: { station: null, no_snapshot: true } });
+      }
       if (window.PROGRAMS && window.PROGRAMS.programs && window.PROGRAMS.programs.length) {
         return Promise.resolve(window.PROGRAMS);
       }
@@ -2610,56 +3217,206 @@
       });
     }
 
-    function loadLive(timeoutMs) {
+    /* index.html 里是写死加载主站那份 data/segments.js 的（主站行为不变）。
+       副站的分段在各自数据目录里，这里单独取回覆盖 window.SEGMENTS —— 必须在 boot 之前
+       完成，否则频道会拿主站的 cid 去匹配副站的分P，一个都对不上。 */
+    // 从 segments.js 的文本里取出对象（格式固定是 `window.SEGMENTS = {...};`）
+    function segObject(txt) {
+      if (!txt) return null;
+      var i = txt.indexOf('{'), k = txt.lastIndexOf('}');
+      if (i < 0 || k <= i) return null;
+      try { return JSON.parse(txt.slice(i, k + 1)); } catch (e) { return null; }
+    }
+
+    /* index.html 里静态加载的那份是**主站**的分段。多选时要把其余板块各自取回、
+       并进同一个对象（cid 全局唯一，直接合并不冲突）。
+       没选主站时先清空，免得主站的 cid 留在内存里白占地方。 */
+    function loadStationSegments() {
+      var mine = [], keepMain = false;
+      ST_SET.forEach(function (id, i) {
+        var isMain = MAIN_ID ? (id === MAIN_ID) : (i === 0);
+        if (isMain) { keepMain = true; return; }
+        mine.push(id);
+      });
+      if (!mine.length) return Promise.resolve();
+      if (!keepMain) window.SEGMENTS = {};
+      return Promise.all(mine.map(function (id) {
+        return fetch('data/segments.js?station=' + encodeURIComponent(id))
+          .then(function (r) { return r.ok ? r.text() : ''; })
+          .then(segObject)
+          .catch(function () { return null; });   // 离线时忽略，页面会提示没有分段
+      })).then(function (objs) {
+        var merged = window.SEGMENTS || {};
+        objs.forEach(function (o) {
+          if (!o) return;
+          for (var k in o) {
+            if (Object.prototype.hasOwnProperty.call(o, k)) merged[k] = o[k];
+          }
+        });
+        window.SEGMENTS = merged;
+      });
+    }
+
+    /* 取某个板块的清单。多板块时并行取回再合并 —— 媒体接口（playurl / dash / stream）
+       本来就只认 bvid / cid、与板块无关，所以「混合播放多人」在前端合并清单就够了，
+       服务端一行都不用动。 */
+    function loadOne(id, timeoutMs) {
       var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
       var timer = setTimeout(function () { if (ctl) ctl.abort(); }, timeoutMs);
-      return fetch('/api/programs?refresh=1', ctl ? { signal: ctl.signal } : undefined)
+      var u = '/api/programs?refresh=1' + (id ? '&station=' + encodeURIComponent(id) : '');
+      return fetch(u, ctl ? { signal: ctl.signal } : undefined)
         .then(function (r) {
           clearTimeout(timer);
           if (!r.ok) throw new Error('HTTP ' + r.status);
           return r.json();
-        })
-        .then(function (d) {
+        });
+    }
+
+    function mergeLive(parts) {
+      var all = [], seen = {}, fails = [], firstMeta = null, newest = 0;
+      parts.forEach(function (d) {
+        var head = (d.meta && d.meta.station) || null;
+        if (d._fail) {
+          fails.push(head ? (head.short || head.id) : d._fail);
+          return;
+        }
+        if (!firstMeta && d.meta) firstMeta = d.meta;
+        if (d.meta && (d.meta.generated_at || 0) > newest) newest = d.meta.generated_at || 0;
+        (d.programs || []).forEach(function (p) {
+          if (seen[p.bvid]) return;         // 同一条视频不会跨板块重复，保险起见去重
+          seen[p.bvid] = 1;
+          if (head) {
+            // 打上来源标记：列表里的来源色点、以及「这条是谁的」提示都靠它
+            p._sid = head.id;
+            p._short = head.short || head.name || head.id;
+            p._accent = head.accent || '';
+          }
+          all.push(p);
+        });
+      });
+      if (!all.length) throw new Error('清单为空');
+      return {
+        programs: all,
+        meta: {
+          count: all.length,
+          station: (firstMeta && firstMeta.station) || null,
+          generated_at: newest || Math.floor(Date.now() / 1000),
+          mixed: true,
+          mixed_count: parts.length,
+          mixed_failed: fails
+        }
+      };
+    }
+
+    function loadLive(timeoutMs) {
+      var ids = ST_SET.length ? ST_SET.slice() : [''];
+      if (ids.length === 1) {
+        return loadOne(ids[0], timeoutMs).then(function (d) {
           if (!d || !d.programs || !d.programs.length) throw new Error('清单为空');
           return d;
         });
+      }
+      return Promise.all(ids.map(function (id) {
+        // 某一位取不到不该把整条时间轴拖垮：记下名字，其余照常合并
+        return loadOne(id, timeoutMs).catch(function (e) {
+          return { programs: [], meta: { error: String((e && e.message) || e) }, _fail: id };
+        });
+      })).then(mergeLive);
     }
 
     // 起播不等服务端：先用手上这份清单（页面自带的 data/programs.js）立刻开播，
     // 抓最新清单放到后台做。实测 programs?refresh=1 要 1.2 秒，让它挡在起播前面
     // 就是白等 —— 拿到新清单后「软刷新」，不打断正在播的那一段。
-    if (window.PROGRAMS && window.PROGRAMS.programs && window.PROGRAMS.programs.length) {
+    /* 内嵌的 window.PROGRAMS 是**主站（四时小路）**的离线快照，用来让首页秒开。
+       切到别的主播时绝不能拿它启动 —— 否则屏幕上写着别人、内容却是小路的。
+       副站一律走下面的实时接口，拿不到就停在「这位还没有回放数据」的说明上。 */
+    /* 拿到新清单后「软刷新」：只换数据，不动正在跑的循环。
+       循环里段的时间轴按 epoch 算的，重建会让当前位置映射到别的段、
+       播放被打断重载（实测跳了一次）—— 所以标记 cycleStale，等下次自然换段再套用。 */
+    function softApply(live) {
+      if (!live || !live.programs || !live.programs.length) return false;
+      var same = live.meta && live.meta.count === (state.meta || {}).count
+                 && (state.all[0] || {}).bvid === live.programs[0].bvid;
+      // 清单没变也要更新 meta：那里显示「实时数据 HH:MM」，
+      // 是用户判断「看到的是不是最新」的唯一依据（verify_release 也看这个）
+      state.meta = live.meta || state.meta;
+      updateMetaText();
+      if (same) return false;
+      state.all = live.programs;
+      state.cycleStale = true;
+      renderChips();
+      renderList();
+      return true;
+    }
+
+    /* 过一会儿再问一次清单。服务端现在是「先把手上那份给出去、后台重抓」，
+       所以首屏那次拿到的可能不是最新的 —— 后台抓完再来一次就补齐了。
+       不这么做的话，新发布的回放要等下次刷新页面才出现。 */
+    function refreshSoon(delayMs) {
+      setTimeout(function () {
+        loadLive(20000).then(function (live) {
+          window.__LIVE_OK = true;
+          softApply(live);
+        }).catch(function (e) {
+          window.__LIVE_ERR = e && e.message ? e.message : String(e);
+        });
+      }, delayMs || 0);
+    }
+
+    if (isMainOnly() && window.PROGRAMS && window.PROGRAMS.programs
+        && window.PROGRAMS.programs.length) {
       boot(window.PROGRAMS);
-      loadLive(20000).then(function (live) {
-        window.__LIVE_OK = true;
-        if (!live || !live.programs || !live.programs.length) return;
-        var same = live.meta && live.meta.count === (state.meta || {}).count
-                   && (state.all[0] || {}).bvid === live.programs[0].bvid;
-        // 清单没变也要更新 meta：那里显示「实时数据 HH:MM」，
-        // 是用户判断「看到的是不是最新」的唯一依据（verify_release 也看这个）
-        state.meta = live.meta || state.meta;
-        updateMetaText();
-        if (same) return;
-        // 只换数据，不动正在跑的循环：循环里段的时间轴是按 epoch 算的，
-        // 重建会让当前位置映射到别的段，播放就会被打断重载（实测跳了一次）。
-        // 标记为「待重建」，等下一次自然换段时再套用。
-        state.all = live.programs;
-        state.cycleStale = true;
-        renderChips();
-        renderList();
-      }).catch(function (e) {
-        window.__LIVE_ERR = e && e.message ? e.message : String(e);
-      });
+      refreshSoon(0);
       prefetchLiveStatus();
     } else {
-      loadLive(20000)
+      loadStationSegments()
+        .then(function () { return loadLive(20000); })
         .catch(function (e) {
           window.__LIVE_ERR = e && e.message ? e.message : String(e);
           return loadLocal();
         })
-        .then(boot)
+        .then(function (d) {
+          // 副站拿不到清单（还没配 series_id）：给一句明确说明，
+          // 不要留一片空白让人以为页面坏了
+          if (ST && (!d || !((d.programs || []).length))) {
+            var tip = document.getElementById('station-empty');
+            if (tip) {
+              tip.hidden = false;
+              tip.textContent = '正在自动获取这位主播的回放清单…';
+              // 把「为什么还没有」摊开说：自动获取失败时给出原因，
+              // 而不是丢一句让人自己去改配置
+              explainNoPrograms().then(function (msg) { tip.textContent = msg; });
+            }
+            return;
+          }
+          var r = boot(d);
+          // 服务端明确说「这份旧了、正在后台重抓」→ 给它几秒，再取一次
+          if (d && d.stale) refreshSoon(4000);
+          return r;
+        })
         .catch(fail);
     }
+  }
+
+  /* 副站清单为空时说清原因：服务端的回放来源状态（自动发现 / 手填 / 失败原因） */
+  function explainNoPrograms() {
+    return fetch('/api/series').then(function (r) { return r.json(); }).then(function (d) {
+      var s = (d && d.series) || {};
+      var who = ((d && d.station) || {}).short || '这位主播';
+      if (s.error) {
+        return '没能自动获取「' + who + '」的回放清单：' + s.error
+          + '。稍后会自动重试（设置页有「重新获取」按钮）。'
+          + '现在仍然可以看它的实时直播：进「直播间」或「监控室」。';
+      }
+      if (!s.id) {
+        return '正在自动获取「' + who + '」的回放清单（主页 → 合集和系列 → 系列）…'
+          + '稍等几秒刷新；同时也能看它的实时直播。';
+      }
+      return '已定位到「' + who + '」的回放系列 ' + s.id + '，正在拉取画面信息…'
+        + '稍等一会儿刷新即可。';
+    }).catch(function () {
+      return '还没拿到这位主播的回放清单，后台会自动重试；也可以看它的实时直播。';
+    });
   }
 
   // 提前问一次直播状态：等用户切到直播间时是热的（服务端缓存 60 秒）
@@ -2667,9 +3424,718 @@
     fetch('/api/live/playinfo').catch(function () { /* 离线时忽略 */ });
   }
 
+
+  /* 切换板块时把扫过动画交给新页面播：旧页面立刻重载，新页面一落地就把动画放完。
+     用 sessionStorage 传一下 —— 重载会丢掉内存里的一切。 */
+  function playArrivalSweep() {
+    var accent = '';
+    try {
+      accent = sessionStorage.getItem('xl_sweep') || '';
+      sessionStorage.removeItem('xl_sweep');
+    } catch (e) { return; }
+    var hex = themeHex(accent);
+    if (!hex) return;
+    var sel = document.getElementById('station-lamps');
+    var b = sel ? sel.getBoundingClientRect() : null;
+    themeSweep(hex, b ? b.left + b.width / 2 : window.innerWidth / 2,
+               b ? b.bottom : 60);
+  }
+
+  /* 空闲时预热其它板块的清单。首次访问某位主播要现抓 1.5~2.6 秒，
+     提前抓过之后再切过去就是瞬间。刻意错开间隔、每个会话每位只做一次、
+     页面不可见就跳过 —— 别为了流畅度去惹 B 站风控（空间类接口本来就容易 412）。 */
+  var PREFETCH_GAP = 7000;
+  var prefetchStarted = false;
+
+  function prefetchMark() {
+    try { return JSON.parse(sessionStorage.getItem('xl_prefetch') || '{}') || {}; }
+    catch (e) { return {}; }
+  }
+
+  function prefetchOthers() {
+    if (prefetchStarted || state.offline) return;
+    if (!STATIONS.length) {
+      if (!prefetchStarted) {
+        prefetchStarted = true;                 // 防重入：拉不到列表就不再试
+        fetchStations().then(function () {
+          prefetchStarted = false;
+          prefetchOthers();
+        });
+      }
+      return;
+    }
+    prefetchStarted = true;
+    var done = prefetchMark();
+    var todo = STATIONS.filter(function (s) {
+      return ST_SET.indexOf(s.id) < 0 && s.has_programs && !done[s.id];
+    }).map(function (s) { return s.id; });
+    if (!todo.length) return;
+    var i = 0;
+    var next = function () {
+      if (i >= todo.length) return;
+      if (document.hidden) { setTimeout(next, PREFETCH_GAP); return; }
+      var sid = todo[i++];
+      done[sid] = 1;
+      try { sessionStorage.setItem('xl_prefetch', JSON.stringify(done)); } catch (e) { /* 忽略 */ }
+      fetch('/api/programs?station=' + encodeURIComponent(sid))
+        .catch(function () { /* 离线忽略 */ })
+        .then(function () { setTimeout(next, PREFETCH_GAP); });
+    };
+    setTimeout(next, 9000);        // 等首屏自己忙完再开始
+  }
+
+  /* ================= 主播切换器 =================
+     切换 = 记下选择 + 整页刷新。切换不是高频操作，刷新能保证
+     「所有视图的数据都属于同一位主播」—— 比逐个视图去重新拉取可靠得多
+     （漏掉一处就会出现「界面是小路、数据是别人」的串台）。 */
+  var STATIONS = [];
+
+  /* 当前板块的「短名」，用在文案里（主站沿用原来的「小路」叫法，不改用户习惯）。
+     applyStationBrand 会按板块更新它。 */
+  var ST_SHORT = '小路';
+  var FAB_LABEL = ST_SHORT + '状态';
+
+  /* 整页底色/卡片底色是否跟随本板块的色调。
+     主站（四时小路）**不上色** —— 它是「小路电台」本体，保持原来的黑红配色；
+     其它板块各带一点自己的环境色，切换时能一眼看出换人了。
+     由 fetchStations / 切换处理按 st.main 设置。 */
+  var ST_TINT = false;
+
+  /* 副站板块的品牌文案 —— 主站一个字都不改（还是「二十四时小路电台」原样）。
+     这些位置原本都写死成小路的：大标题、顶栏站名、版权署名、数据来源链接。
+     切到别的主播时不改，就成了反向错位：标题写着小路、内容却是枝堇的。 */
+  function applyStationBrand(st) {
+    if (!st) return;
+    var short = st.short || st.name || '';
+
+    // 右下角浮标跟着板块改名：主站沿用原来的「小路状态」，别的主播用各自短名。
+    // 这一段对所有板块都执行（下面那些品牌文案只改副站）。
+    ST_SHORT = st.main ? '小路' : short;
+    FAB_LABEL = ST_SHORT + '状态';
+    if (el.statusFab) el.statusFab.title = FAB_LABEL;
+    if (el.statusFabText) el.statusFabText.textContent = FAB_LABEL;
+    if (el.statusPanelTitle) el.statusPanelTitle.textContent = FAB_LABEL;
+
+    if (st.main) return;
+    var label = '二十四时' + short + '电台';
+    function setTxt(id, txt) {
+      var e = document.getElementById(id);
+      if (e) e.textContent = txt;
+    }
+    setTxt('tb-brand', st.name || short);
+    setTxt('tb-cur', label);
+    setTxt('live-title', label);
+    setTxt('live-sub', '这里收录了' + short + '全部的直播回放。'
+      + '随时打开都在直播中，自动排期、自动去重，不重复。');
+    var sp = document.getElementById('tb-space');
+    if (sp && st.mid) sp.setAttribute('href', 'https://space.bilibili.com/' + st.mid);
+    setTxt('gbtxt', short + 'B站空间');
+    var cr = document.getElementById('cr-name');
+    if (cr) {
+      cr.textContent = st.name || short;
+      if (st.mid) cr.setAttribute('href', 'https://space.bilibili.com/' + st.mid);
+    }
+    var cs = document.getElementById('cr-src');
+    var series = st.series || {};
+    if (cs) {
+      if (st.mid && series.id) {
+        cs.setAttribute('href', 'https://space.bilibili.com/' + st.mid
+          + '/lists/' + series.id + '?type=series');
+      }
+      cs.textContent = '直播回放系列' + (series.total ? '（' + series.total + ' 场）' : '');
+    }
+    document.title = label + ' · ' + short + ' 24 小时直播回放';
+  }
+
+  function fetchStations() {
+    return fetch('/api/stations').then(function (r) { return r.json(); })
+      .then(function (d) {
+        STATIONS = (d && d.stations) || [];
+        var mains = STATIONS.filter(function (s) { return s.main; });
+        if (mains[0]) {
+          MAIN_ID = mains[0].id;
+          try { localStorage.setItem(MAIN_KEY, MAIN_ID); } catch (e) { /* 隐私模式 */ }
+        }
+        // 顺便把当前板块的主题色落定（不再放动画：首屏那次由缓存值负责，避免开屏就闪一下）
+        var curId = ST || ((mains[0] || {}).id || '');
+        var cur = findStation(curId);
+        if (cur) {
+          ST_TINT = !cur.main;      // 主站不上色（保持黑红），副站按自己色调
+          applyTheme(cur.accent);
+          applyStationBrand(cur);
+        }
+        renderMixedNote();          // 提示条要等名单回来才知道短名
+        // 名单刚回来，补一次渲染：如果这一页本来就是微博视图（刷新时 URL 停在
+        // #/weibo），switchView 那次渲染发生在名单到达之前 —— 那时 findStation()
+        // 查不到人，页面会写成「这位板块还没有配置微博」，而且不会自己纠正。
+        if (state.view === 'weibo') renderWeibo();
+        return STATIONS;
+      })
+      .catch(function () { STATIONS = []; return STATIONS; });
+  }
+
+  /* ---------------------------------------------------------- 板块色灯 */
+
+  var lampTimer = null;
+
+  /* 灭灯的暗版：按固定比例压暗（不是混进黑色），这样各板块的灯灭掉时一样暗 */
+  function dimHex(hex, k) {
+    var h = themeHex(hex);
+    if (!h) return '#17171c';
+    var out = '#';
+    for (var i = 1; i <= 5; i += 2) {
+      var v = Math.round(parseInt(h.substr(i, 2), 16) * k);
+      out += (v < 16 ? '0' : '') + v.toString(16);
+    }
+    return out;
+  }
+
+  function renderLamps(live) {
+    var box = document.getElementById('station-lamps');
+    if (!box) return;
+    box.innerHTML = STATIONS.map(function (s) {
+      var on = ST_SET.indexOf(s.id) >= 0;
+      var name = (s.short || s.name) + (s.main ? '（主站）' : '');
+      var hint = on ? ' · 已点亮，点一下取消' : ' · 点一下把 TA 也加进来（混合播放）';
+      var accent = s.accent || '#8a8a95';
+      return '<button type="button" class="lamp' + (on ? ' on' : '') + '"'
+        + ' data-id="' + esc(s.id) + '"'
+        + ' style="--lc:' + esc(accent) + ';--lcd:' + esc(dimHex(accent, 0.26)) + '"'
+        + ' aria-pressed="' + (on ? 'true' : 'false') + '"'
+        + ' aria-label="' + esc(name + hint) + '"'
+        + ' title="' + esc(name + hint) + '"></button>';
+    }).join('');
+    // 主位在播时给它的灯加一圈绿边（原来的小圆点就是这个作用）
+    if (live) {
+      var b = box.querySelector('[data-id="' + ST + '"]');
+      if (b) b.classList.add('living');
+    }
+  }
+
+  function toggleStation(id) {
+    var i = ST_SET.indexOf(id);
+    if (i >= 0) ST_SET.splice(i, 1);
+    else ST_SET.push(id);
+    if (!ST_SET.length) {
+      // 不允许全灭：页面总得有个主体。回到主站。
+      var mains = STATIONS.filter(function (s) { return s.main; });
+      ST_SET = [(mains[0] || STATIONS[0] || { id: 'komichi' }).id];
+    }
+    ST = ST_SET[0];
+    saveStations();
+    renderLamps();
+    // 视觉反馈不等重载：主题色/扫过动画立刻按新的主位走
+    var nxt = findStation(ST);
+    if (nxt && nxt.accent) {
+      ST_TINT = !nxt.main;
+      applyTheme(nxt.accent);
+      try { sessionStorage.setItem('xl_sweep', nxt.accent); } catch (e) { /* 忽略 */ }
+    }
+    /* 延迟重载：把连着点几下的操作合并成一次重载（点亮 4 位只刷一次页面）。
+       数据源变了必须重建时间轴，整页重载是最省事也最不容易错的做法
+       —— 清单与分段都带缓存，重载后列表基本是立刻出来的。 */
+    if (lampTimer) clearTimeout(lampTimer);
+    lampTimer = setTimeout(function () { location.reload(); }, 340);
+  }
+
+  function mountStationPicker() {
+    var box = document.getElementById('station-lamps');
+    if (!box) return;
+    fetchStations().then(function (list) {
+      if (!list.length) return;
+      // 选择里可能有已经不存在的板块（用户改了 stations.json）→ 剔除；空了就回主站
+      var ids = list.map(function (s) { return s.id; });
+      ST_SET = ST_SET.filter(function (x) { return ids.indexOf(x) >= 0; });
+      if (!ST_SET.length) {
+        var mains = list.filter(function (s) { return s.main; });
+        ST_SET = [(mains[0] || list[0]).id];
+        ST = ST_SET[0];
+        saveStations();
+      }
+      renderLamps();
+      renderMixedNote();
+      box.addEventListener('click', function (e) {
+        var b = e.target && e.target.closest ? e.target.closest('.lamp') : null;
+        if (b) toggleStation(b.getAttribute('data-id'));
+      });
+      var note = document.getElementById('mixed-note');
+      if (note) {
+        note.addEventListener('click', function (e) {
+          var b = e.target && e.target.closest ? e.target.closest('.mst') : null;
+          if (!b) return;
+          var id = b.getAttribute('data-src');
+          state.onlySrc = (state.onlySrc === id) ? '' : id;   // 再点一下恢复全部
+          renderList();
+        });
+      }
+      fetch('/api/live/playinfo').then(function (r) { return r.json(); })
+        .then(function (d) { if (d && d.living) renderLamps(true); })
+        .catch(function () { /* 离线忽略 */ });
+    });
+  }
+
+  /* 混合播放的说明条。多位时列表里会交替出现几个人的内容，
+     不说明一下会被当成「数据串了」。 */
+  function renderMixedNote() {
+    var box = document.getElementById('mixed-note');
+    if (!box) return;
+    if (ST_SET.length < 2) { box.hidden = true; return; }
+    var names = ST_SET.map(function (id) {
+      var s = findStation(id);
+      return { id: id, name: s ? (s.short || s.name) : id, color: (s && s.accent) || '#8a8a95' };
+    });
+    /* 每位给一个可点的胶囊（带条数）：
+       列表是按发布时间倒序的，内容少的那位可能排到好几页之后 ——
+       点一下名字就能单独看 TA，顺便确认「确实合进来了」。 */
+    var counts = {};
+    (state.all || []).forEach(function (p) {
+      if (p._sid) counts[p._sid] = (counts[p._sid] || 0) + 1;
+    });
+    box.innerHTML = '正在<b>混合播放</b>：'
+      + names.map(function (n) {
+          var on = state.onlySrc === n.id;
+          return '<button type="button" class="mst' + (on ? ' on' : '') + '"'
+            + ' data-src="' + esc(n.id) + '" style="--lc:' + esc(n.color) + '"'
+            + ' title="' + esc(n.name + '（' + (counts[n.id] || 0) + ' 个节目）'
+              + (on ? '，点一下看全部' : '，点一下只看 TA')) + '">'
+            + '<i></i>' + esc(n.name) + '<b>' + (counts[n.id] || 0) + '</b></button>';
+        }).join('<span class="msep">+</span>')
+      + '<span class="mcnt">' + (state.onlySrc
+          ? '只在看这一位，点名字恢复全部'
+          : '共 ' + (state.all || []).length + ' 个节目') + '</span>';
+    box.hidden = false;
+  }
+
+  /* ================= 监控室（多路同看） =================
+     一个视图同时满足「同时看多人」与「监控室」：每格一路，可切内容源。
+     音频策略：默认全部静音，点 🔊 只开这一路 —— 几路声音混在一起没法听。 */
+  var multiPlayers = [];
+
+  function multiTeardown() {
+    multiPlayers.forEach(function (p) {
+      try { p.destroy(); } catch (e) { /* 已经销毁 */ }
+    });
+    multiPlayers = [];
+  }
+
+  function multiQnChoice() {
+    var s = document.getElementById('multi-qn');
+    return s ? s.value : 'min';
+  }
+
+  function multiPickQn(choice, qualities) {
+    var list = (qualities || []).slice();
+    if (!list.length) return 250;
+    var lowest = list.reduce(function (a, b) { return (a.qn <= b.qn ? a : b); });
+    if (choice === 'min') return lowest.qn;
+    var want = parseInt(choice, 10);
+    var hit = list.filter(function (q) { return q.qn === want; })[0];
+    return hit ? hit.qn : lowest.qn;      // 该主播没有这一档就退到最低档
+  }
+
+  function multiCellHtml(s) {
+    var accent = s.accent || '#8a8a95';
+    var picked = ST_SET.indexOf(s.id) >= 0;
+    return '<div class="ms-cell loading' + (picked ? ' picked' : '') + '"'
+      + ' data-id="' + esc(s.id) + '" style="--lc:' + esc(accent) + '">'
+      + '<video muted playsinline></video>'
+      + '<div class="ms-off"><b>' + esc(s.short || s.name) + '</b>'
+      + '<span class="ms-off-sub">正在获取开播状态…</span></div>'
+      + '<div class="ms-bar">'
+      + '<span class="ms-tag" style="background:' + esc(accent) + '">' + esc(s.tag || '') + '</span>'
+      + '<span class="ms-name">' + esc(s.short || s.name) + '</span>'
+      + '<span class="ms-state" data-role="state">—</span>'
+      + '<span class="ms-btns">'
+      + '<button class="ms-btn" data-act="solo" type="button" title="只开这一路的声音">🔇</button>'
+      + '<button class="ms-btn" data-act="zoom" type="button" title="放大 / 还原">⤢</button>'
+      + '</span></div></div>';
+  }
+
+  function startMultiCell(s, cell) {
+    var video = cell.querySelector('video');
+    var off = cell.querySelector('.ms-off');
+    var sub = cell.querySelector('.ms-off-sub');
+    var stateEl = cell.querySelector('[data-role="state"]');
+    var maxTry = 2;                      // 断流重连次数
+
+    function live(title) {
+      stateEl.textContent = title || '直播中';
+      if (off) off.style.display = 'none';
+    }
+
+    function offline(text) {
+      if (stateEl) stateEl.textContent = text;
+      if (off) {
+        off.style.display = '';
+        sub.textContent = text;
+      }
+      cell.classList.remove('loading');
+    }
+
+    function connect(qualities, attempt) {
+      if (typeof mpegts === 'undefined') { offline('播放库缺失（assets/mpegts.js）'); return; }
+      var qn = multiPickQn(multiQnChoice(), qualities);
+      var p = mpegts.createPlayer({
+        type: 'flv', isLive: true,
+        url: '/api/live/stream?station=' + encodeURIComponent(s.id) + '&qn=' + qn,
+        enableStashBuffer: false,
+        liveBufferLatencyChasing: true
+      });
+      p.attachMediaElement(video);
+      p.load();
+      try {
+        var pr = p.play();
+        if (pr && typeof pr.catch === 'function') pr.catch(function () { /* 等用户手势 */ });
+      } catch (e) { /* 浏览器可能要求手势 */ }
+      p.on(mpegts.Events.ERROR, function () {
+        try { p.destroy(); } catch (e) { /* 已销毁 */ }
+        if (attempt < maxTry) {
+          stateEl.textContent = '连接中断，重连中…（' + (attempt + 1) + '/' + maxTry + '）';
+          setTimeout(function () { connect(qualities, attempt + 1); }, 3000);
+        } else {
+          offline('连接中断，可点「刷新开播状态」重试');
+        }
+      });
+      multiPlayers.push(p);
+    }
+
+    fetch('/api/live/playinfo?station=' + encodeURIComponent(s.id))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        cell.classList.remove('loading');
+        if (!d || !d.living) {
+          offline(d && d.title ? ('未开播 · ' + d.title) : '未开播');
+          return;
+        }
+        live(d.title);
+        connect(d.qualities, 0);
+      })
+      .catch(function () { offline('开播状态获取失败'); });
+  }
+
+  function multiSolo(cell) {
+    var btn = cell.querySelector('[data-act="solo"]');
+    var on = !btn.classList.contains('on');
+    Array.prototype.forEach.call(document.querySelectorAll('.ms-cell'), function (c) {
+      var v = c.querySelector('video');
+      var b = c.querySelector('[data-act="solo"]');
+      var self = (c === cell);
+      var audible = on && self;
+      if (v) v.muted = !audible;
+      if (b) {
+        b.classList.toggle('on', audible);
+        b.textContent = audible ? '🔊' : '🔇';
+      }
+      c.classList.toggle('muted-off', audible);
+    });
+  }
+
+  function multiZoom(cell) {
+    var grid = document.getElementById('multi-grid');
+    if (!grid) return;
+    var on = !cell.classList.contains('lead');
+    Array.prototype.forEach.call(grid.querySelectorAll('.ms-cell'), function (c) {
+      c.classList.remove('lead');
+    });
+    if (on) cell.classList.add('lead');
+    grid.classList.toggle('solo', on);
+  }
+
+  function bindMulti() {
+    var grid = document.getElementById('multi-grid');
+    if (!grid || grid.getAttribute('data-bound') === '1') return;
+    grid.setAttribute('data-bound', '1');
+    grid.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('.ms-btn') : null;
+      if (!btn) return;
+      var cell = btn.closest('.ms-cell');
+      if (!cell) return;
+      var act = btn.getAttribute('data-act');
+      if (act === 'solo') multiSolo(cell);
+      if (act === 'zoom') multiZoom(cell);
+    });
+    var rf = document.getElementById('multi-refresh');
+    if (rf) rf.addEventListener('click', function () { renderMulti(); });
+    var qs = document.getElementById('multi-qn');
+    if (qs) qs.addEventListener('change', function () { renderMulti(); });
+  }
+
+  function renderMulti() {
+    var grid = document.getElementById('multi-grid');
+    if (!grid) return;
+    multiTeardown();
+    grid.classList.remove('solo');
+    fetchStations().then(function (list) {
+      if (!list.length) {
+        grid.innerHTML = '<p class="sub">没读到主播列表（data/stations.json）。</p>';
+        return;
+      }
+      grid.innerHTML = list.map(multiCellHtml).join('');
+      var note = document.getElementById('multi-note');
+      if (note) {
+        note.textContent = list.length + ' 路 · 声音默认关闭，点 🔊 独奏；点 ⤢ 放大';
+      }
+      list.forEach(function (s) {
+        var cell = grid.querySelector('.ms-cell[data-id="' + s.id + '"]');
+        if (cell) startMultiCell(s, cell);
+      });
+    });
+  }
+
+
+  /* ---------------------------------------------------------- 微博 */
+
+  /* 微博正文必须登录才给（游客只能看资料卡），所以这一页有两种「连接」方式：
+     顶上的按钮开一个专用浏览器窗口、由本服务把 cookie 读回来（用户在里面顺手登录）；
+     下面折叠区还能手动粘贴 cookie。两者都存本机文件，不出这台机器。 */
+  var wbState = { data: null, loading: false, polling: false, bound: false };
+
+  function wbSetTxt(id, txt) {
+    var e = document.getElementById(id);
+    if (e) e.textContent = txt;
+  }
+
+  function weiboTip(html) {
+    var n = document.getElementById('wb-note');
+    if (!n) return;
+    if (!html) { n.hidden = true; return; }
+    n.innerHTML = html;
+    n.hidden = false;
+  }
+
+  function wbImgUrl(u) {
+    return '/api/img?u=' + b64url(u);
+  }
+
+  function renderWeibo() {
+    var list = document.getElementById('wb-list');
+    if (!list) return;
+    var st = findStation(ST) || {};
+    var name = st.short || st.name || '';
+    wbSetTxt('wb-title', (name || '') + (name ? '的' : '') + '微博');
+    if (!st.weibo) {
+      wbSetTxt('wb-sub', '这位板块还没有配置微博。');
+      weiboTip('在 <code>data/stations.json</code> 里给它加一个 '
+        + '<code>"weibo": "微博UID"</code> 就会出现在这里。');
+      document.getElementById('wb-profile').hidden = true;
+      list.innerHTML = '';
+      return;
+    }
+    wbSetTxt('wb-sub', '来自微博主页的最新内容（weibo.com/u/' + st.weibo + '）。');
+    loadWeibo();
+  }
+
+  function loadWeibo(force) {
+    var list = document.getElementById('wb-list');
+    if (!list || wbState.loading) return;
+    wbState.loading = true;
+    if (!wbState.data) {
+      list.innerHTML = '<div class="wb-skel"></div><div class="wb-skel"></div>';
+    }
+    fetch('/api/weibo' + (force ? '?refresh=1' : ''))
+      .then(function (r) { return r.json(); })
+      .then(function (d) { wbState.data = d; wbState.loading = false; paintWeibo(d); })
+      .catch(function (e) {
+        wbState.loading = false;
+        list.innerHTML = '';
+        weiboTip('取微博失败：<b>' + esc(e && e.message ? e.message : String(e)) + '</b>');
+      });
+  }
+
+  function paintWeibo(d) {
+    var pf = d.profile || null;
+    var box = document.getElementById('wb-profile');
+    var list = document.getElementById('wb-list');
+    var foot = document.getElementById('wb-foot');
+
+    if (pf) {
+      box.hidden = false;
+      box.innerHTML =
+        (pf.avatar ? '<img class="wb-avatar" src="' + esc(wbImgUrl(pf.avatar))
+                      + '" alt="" loading="lazy" referrerpolicy="no-referrer">' : '')
+        + '<div class="wb-pf-main">'
+        + '<div class="wb-pf-row"><span class="wb-pf-name">' + esc(pf.name) + '</span>'
+        + (pf.verified ? '<span class="wb-verified">' + esc(pf.verified) + '</span>' : '')
+        + '</div>'
+        + (pf.desc ? '<div class="wb-pf-desc">' + esc(pf.desc) + '</div>' : '')
+        + '<div class="wb-pf-stats">粉丝 <b>' + fmtNum(pf.followers) + '</b> · 关注 <b>'
+        + fmtNum(pf.follows) + '</b> · 微博 <b>' + fmtNum(pf.posts) + '</b></div>'
+        + '<a class="wb-pf-link" href="' + esc(pf.home) + '" target="_blank" rel="noopener">'
+        + '在微博打开主页 →</a>'
+        + '</div>';
+    } else {
+      box.hidden = true;
+    }
+
+    var posts = d.posts || [];
+    if (posts.length) {
+      list.innerHTML = posts.map(wbItem).join('');
+      weiboTip('');
+    } else {
+      list.innerHTML = '';
+      if (d.need_login) {
+        weiboTip(wbLoginNote(d.logged));
+      } else if (d.error) {
+        weiboTip('没取到内容：<b>' + esc(d.error) + '</b>');
+      } else {
+        weiboTip('这位最近没有公开微博。');
+      }
+    }
+    if (foot) {
+      foot.hidden = !posts.length;
+      foot.textContent = '共 ' + posts.length + ' 条 · 点卡片可在微博查看原帖';
+    }
+  }
+
+  function wbLoginNote(logged) {
+    return '<span>微博现在<b>要求登录</b>才展示正文（游客只能看到上面的资料卡）。</span>'
+      + '<button class="btn small primary" id="wb-connect" type="button">'
+      + (logged ? '去登录微博' : '登录微博') + '</button>'
+      + '<span id="wb-connect-state">'
+      + (logged
+          ? '当前是<b>访客态</b>：再登录一次，正文就会自动解锁。'
+          : '会弹出一个<b>电脑版</b>微博窗口，扫码或账号登录都行；'
+            + '登录完成后这边会自动解锁，不用回来点别的。')
+      + '</span>';
+  }
+
+  function wbItem(p) {
+    var pics = (p.pics || []).slice(0, 9);
+    var html = '<div class="wb-item">'
+      + '<div class="wb-item-h"><span class="wb-time">' + esc(p.at) + '</span>'
+      + (p.from ? '<span>来自 ' + esc(p.from) + '</span>' : '')
+      + (p.long ? '<span>长文</span>' : '')
+      + '</div>'
+      + '<div class="wb-text">' + esc(p.text) + '</div>';
+    if (pics.length) {
+      html += '<div class="wb-pics' + (pics.length === 1 ? ' one' : '') + '">'
+        + pics.map(function (u) {
+            return '<img loading="lazy" alt="" referrerpolicy="no-referrer" src="'
+              + esc(wbImgUrl(u)) + '">';
+          }).join('') + '</div>';
+    }
+    if (p.retweet) {
+      html += '<div class="wb-retweet">@' + esc(p.retweet.name || '') + '：'
+        + esc(p.retweet.text)
+        + ((p.retweet.pics || []).length
+           ? '<div class="wb-pics one">' + p.retweet.pics.map(function (u) {
+               return '<img loading="lazy" alt="" referrerpolicy="no-referrer" src="'
+                 + esc(wbImgUrl(u)) + '">';
+             }).join('') + '</div>'
+           : '')
+        + '</div>';
+    }
+    html += '<div class="wb-acts">'
+      + '<span>转发 ' + fmtNum(p.reposts) + '</span>'
+      + '<span>评论 ' + fmtNum(p.comments) + '</span>'
+      + '<span>赞 ' + fmtNum(p.likes) + '</span>'
+      + (p.bid ? '<a class="wb-open" target="_blank" rel="noopener" href="https://weibo.com/'
+                 + esc((wbState.data && wbState.data.uid) || '') + '/' + esc(p.bid)
+                 + '">去微博看 →</a>' : '')
+      + '</div></div>';
+    return html;
+  }
+
+  /* 连接：开一个专用浏览器窗口，用户在里头（可顺手登录），
+     本服务通过调试协议把 cookie 读回来。 */
+  function wbConnect() {
+    var btn = document.getElementById('wb-connect');
+    var tip = document.getElementById('wb-connect-state');
+    if (btn) { btn.disabled = true; btn.textContent = '正在打开…'; }
+    postJSON('/api/weibo/login', {})
+      .then(function (d) {
+        if (d.error) {
+          if (btn) { btn.disabled = false; btn.textContent = '登录微博'; }
+          if (tip) tip.textContent = d.error;
+          return;
+        }
+        if (tip) tip.innerHTML = '已打开<b>电脑版</b>微博窗口，请在里面登录'
+          + '（扫码 / 账号都行；不登录也能看资料卡）…';
+        wbPollStart();
+      })
+      .catch(function () {
+        if (btn) { btn.disabled = false; btn.textContent = '登录微博'; }
+        if (tip) tip.textContent = '打开失败，请重试';
+      });
+  }
+
+  function wbPollStart() {
+    if (wbState.polling) return;
+    wbState.polling = true;
+    var n = 0;
+    (function tick() {
+      if (!wbState.polling) return;
+      if (state.view !== 'weibo' || ++n > 180) { wbState.polling = false; return; }
+      fetch('/api/weibo/login/poll')
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var tip = document.getElementById('wb-connect-state');
+          if (d.state === 'visitor') {
+            if (tip) {
+              tip.innerHTML = '已连上（<b>访客</b>）：资料卡可看。'
+                + '在那个窗口里登录微博，就能看到正文 —— 登录后会<b>自动完成</b>。';
+            }
+            loadWeibo(true);          // 访客态也要把资料卡刷出来
+          } else if (d.state === 'done') {
+            wbState.polling = false;
+            if (tip) tip.innerHTML = '已登录' + (d.nick ? '：<b>' + esc(d.nick) + '</b>' : '')
+              + '，正文已解锁。';
+            loadWeibo(true);
+            return;
+          } else if (d.state === 'timeout') {
+            wbState.polling = false;
+            if (tip) tip.textContent = d.error || '等待超时，可以再点一次。';
+            return;
+          }
+          setTimeout(tick, 2000);
+        })
+        .catch(function () { setTimeout(tick, 3000); });
+    })();
+  }
+
+  function bindWeibo() {
+    if (wbState.bound) return;
+    wbState.bound = true;
+    var save = document.getElementById('wb-cookie-save');
+    var clear = document.getElementById('wb-cookie-clear');
+    var state1 = document.getElementById('wb-cookie-state');
+    // 「连接微博」按钮是渲染出来的，用事件委托接
+    var note = document.getElementById('wb-note');
+    if (note) {
+      note.addEventListener('click', function (e) {
+        var b = e.target && e.target.closest ? e.target.closest('#wb-connect') : null;
+        if (b) wbConnect();
+      });
+    }
+    if (save) {
+      save.addEventListener('click', function () {
+        var v = document.getElementById('wb-cookie').value.trim();
+        state1.textContent = '正在验证…';
+        postJSON('/api/weibo/cookie', { cookie: v }).then(function (d) {
+          state1.textContent = d.error || ('已保存：能取到 ' + (d.posts || 0) + ' 条微博 ✓');
+          loadWeibo(true);
+        }).catch(function () { state1.textContent = '保存失败'; });
+      });
+    }
+    if (clear) {
+      clear.addEventListener('click', function () {
+        postJSON('/api/weibo/logout', {}).then(function () {
+          state1.textContent = '已清除';
+          document.getElementById('wb-cookie').value = '';
+          wbState.data = null;
+          loadWeibo(true);
+        });
+      });
+    }
+  }
+
+  function bootAux() {
+    mountStationPicker();
+  }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', function () { init(); bootAux(); });
   } else {
     init();
+    bootAux();
   }
 })();

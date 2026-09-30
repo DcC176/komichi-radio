@@ -38,6 +38,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -45,7 +46,7 @@ from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
-from auto_segments import find_ffmpeg, get_json  # noqa: E402
+from auto_segments import find_ffmpeg, get_json, NO_WINDOW, HIDE_SI  # noqa: E402
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -108,7 +109,7 @@ def video_url(bvid, cid):
     raise RuntimeError("取视频地址失败：%s" % last)
 
 
-def grab_frames(ff, url, cid, step):
+def grab_frames(ff, url, cid, step, duration=None, progress=None):
     """一次 ffmpeg 抽帧（fps=1/step）。返回按序排列的文件名。
 
     逐帧 -ss 定位要 ~10 秒/帧，整支视频会到几小时；这里用 filter 的 fps，
@@ -117,15 +118,35 @@ def grab_frames(ff, url, cid, step):
     d = os.path.join(FRAME_DIR, cid)
     os.makedirs(d, exist_ok=True)
     hdr = "Referer: https://www.bilibili.com\r\nUser-Agent: %s\r\n" % UA
-    r = subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-headers", hdr,
-                        "-probesize", "5000000", "-analyzeduration", "5000000",
-                        "-i", url,
-                        "-vf", "%s,fps=1/%g,scale=iw*2:ih*2:flags=neighbor,"
-                               "format=gray" % (CROP, step),
-                        "-y", os.path.join(d, "g_%06d.png")],
-                       capture_output=True, timeout=3600)
-    if r.returncode != 0:
-        sys.stderr.write(r.stderr.decode("utf-8", "ignore")[:400] + "\n")
+    cmd = [ff, "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+           "-headers", hdr,
+           "-probesize", "5000000", "-analyzeduration", "5000000",
+           "-i", url,
+           "-vf", "%s,fps=1/%g,scale=iw*2:ih*2:flags=neighbor,"
+                  "format=gray" % (CROP, step),
+           "-y", os.path.join(d, "g_%06d.png")]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="ignore",
+                            creationflags=NO_WINDOW, startupinfo=HIDE_SI)
+    errbuf = []
+
+    def drain_err():                      # stderr 必须有人读，否则管道写满 ffmpeg 会卡住
+        for line in proc.stderr:
+            errbuf.append(line)
+
+    threading.Thread(target=drain_err, daemon=True).start()
+    for line in proc.stdout:
+        # -progress 每半秒吐一行 out_time=00:01:23.45 → 除以总时长就是抽帧进度。
+        # 精修比音频分析还久（实测 85 秒 vs 36 秒），不报的话进度条会停在 100% 假死。
+        if progress and duration and line.startswith("out_time="):
+            try:
+                h, m, s = line.split("=", 1)[1].strip().split(":")
+                progress(min(1.0, (int(h) * 3600 + int(m) * 60 + float(s)) / float(duration)))
+            except (ValueError, IndexError):
+                pass
+    proc.wait(timeout=3600)
+    if proc.returncode != 0:
+        sys.stderr.write("".join(errbuf)[:400] + "\n")
     return sorted(f for f in os.listdir(d)
                   if f.startswith("g_") and f.endswith(".png"))
 
@@ -191,7 +212,7 @@ def frame_files(cid):
     return os.path.join(FRAME_DIR, cid), []
 
 
-def analyze(bvid, cid, step=5.0, reuse=False, ffmpeg=None, duration=None):
+def analyze(bvid, cid, step=5.0, reuse=False, ffmpeg=None, duration=None, progress=None):
     """主入口：返回 {"keys": [...], "peaks": [[t, v], ...], "frames": n, "reused": bool}
 
     keys 是歌曲边界（该首歌被登记的瞬间），可直接作为分段切点。
@@ -201,7 +222,7 @@ def analyze(bvid, cid, step=5.0, reuse=False, ffmpeg=None, duration=None):
     reused = bool(files)
     if not files:
         url = video_url(bvid, cid)
-        files = grab_frames(ff, url, cid, step)
+        files = grab_frames(ff, url, cid, step, duration=duration, progress=progress)
         d = os.path.join(FRAME_DIR, cid)
     if not files:
         return {"keys": [], "peaks": [], "frames": 0, "reused": False}
@@ -222,7 +243,7 @@ def analyze(bvid, cid, step=5.0, reuse=False, ffmpeg=None, duration=None):
             "frames": len(files), "reused": reused}
 
 
-def detect_keys(bvid, cid, duration=None, step=5.0, ffmpeg=None):
+def detect_keys(bvid, cid, duration=None, step=5.0, ffmpeg=None, progress=None):
     """供 auto_segments.py 调用的薄封装。
 
     失败或信号不可用时返回 []（调用方回退到纯音频结果），不抛异常 ——
@@ -230,7 +251,7 @@ def detect_keys(bvid, cid, duration=None, step=5.0, ffmpeg=None):
     """
     try:
         r = analyze(bvid, cid, step=step, reuse=True, ffmpeg=ffmpeg,
-                    duration=duration)
+                    duration=duration, progress=progress)
         if r.get("reason"):
             sys.stderr.write("  [seg_refine] cid %s 不使用「已唱」边界：%s\n"
                              % (cid, r["reason"]))

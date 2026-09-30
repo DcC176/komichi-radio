@@ -164,18 +164,35 @@ def main():
         st, body = get("")
         print("OK   首页 HTTP %d（%d 字节）" % (st, len(body)))
 
+        # 清单接口现在的契约是「先把手上这份给出去，过期才在后台重抓」——
+        # 切换板块不卡就是靠这个。所以这里分两件事验：
+        #   ① 第二次必须**很快**（命中缓存，不再等 1.5~2.6 秒的现抓）
+        #   ② 强制重抓这条路仍然通（hard=1 同步重抓，generated_at 必须推进）
         stamps = []
-        for i in (1, 2):
-            st, body = get("api/programs?refresh=1")
-            d = json.loads(body.decode("utf-8"))
-            stamps.append(d["meta"]["generated_at"])
-            print("OK   第 %d 次打开  cached=%s  count=%d  generated_at=%d"
-                  % (i, d.get("cached"), d["meta"]["count"], stamps[-1]))
+        st, body = get("api/programs?refresh=1")
+        d = json.loads(body.decode("utf-8"))
+        stamps.append(d["meta"]["generated_at"])
+        print("OK   第 1 次打开  cached=%s  count=%d  generated_at=%d"
+              % (d.get("cached"), d["meta"]["count"], stamps[-1]))
 
-        if stamps[0] == stamps[1]:
-            print("WARN 两次 generated_at 相同，可能命中了缓存")
-        else:
-            print("OK   两次都是实时重抓（generated_at 在推进）")
+        t0 = time.time()
+        st, body = get("api/programs?refresh=1")
+        dt = time.time() - t0
+        d2 = json.loads(body.decode("utf-8"))
+        print("OK   第 2 次打开  %.2fs  cached=%s  count=%d"
+              % (dt, d2.get("cached"), d2["meta"]["count"]))
+        if dt > 1.0:
+            print("FAIL 第二次还要 %.2fs —— 缓存没生效，切板块会明显卡" % dt)
+            return 1
+        print("OK   第二次 %.2fs 内返回（命中缓存，不再现抓）" % dt)
+
+        st, body = get("api/programs?refresh=1&hard=1")
+        d3 = json.loads(body.decode("utf-8"))
+        if d3["meta"]["generated_at"] == stamps[0]:
+            print("FAIL hard=1 没有真正重抓（generated_at 未推进）")
+            return 1
+        print("OK   hard=1 是实时重抓（generated_at 推进到 %d）" % d3["meta"]["generated_at"])
+        d = d3
 
         newest = max(p["pubdate"] for p in d["programs"])
         print("OK   最新一集距今 %.1f 天：%s"

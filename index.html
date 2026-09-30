@@ -11,22 +11,28 @@
 
 <header class="topbar">
   <div class="tb-left">
-    <span class="tb-brand">四时小路Komichi</span>
+    <span class="tb-brand" id="tb-brand">四时小路Komichi</span>
     <span class="tb-sep">/</span>
-    <span class="tb-cur">二十四时小路电台</span>
+    <span class="tb-cur" id="tb-cur">二十四时小路电台</span>
   </div>
   <nav class="tb-tabs">
     <a class="tab" data-view="live" href="#/live">24 小时频道</a>
     <a class="tab" data-view="broadcast" href="#/broadcast">直播间</a>
     <a class="tab" data-view="schedule" href="#/schedule">节目单</a>
     <a class="tab" data-view="categories" href="#/categories">分类</a>
+    <a class="tab" data-view="multi" href="#/multi">监控室</a>
+    <a class="tab" data-view="weibo" href="#/weibo">微博</a>
     <a class="tab" data-view="about" href="#/about">关于</a>
     <a class="tab" data-view="settings" href="#/settings">设置</a>
   </nav>
   <div class="tb-right">
-    <a class="ghost-btn" href="https://space.bilibili.com/1512246445" target="_blank" rel="noopener">
+    <!-- 四色灯：点亮谁就看谁，可以同时点亮多位（混合播放几人的内容）。
+         主站默认点亮，不允许全部熄灭。 -->
+    <div class="station-lamps" id="station-lamps" role="group"
+         title="点亮谁就看谁的内容，可同时点亮多位（混合播放）"></div>
+    <a class="ghost-btn" id="tb-space" href="https://space.bilibili.com/1512246445" target="_blank" rel="noopener">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16v12H4z"/><path d="M8 3l4 3 4-3"/></svg>
-      小路B站空间
+      <span class="gbtxt" id="gbtxt">小路B站空间</span>
     </a>
     <label class="ghost-btn lang-wrap">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>
@@ -48,13 +54,33 @@
 
     <section class="view active" id="view-live">
       <div class="eyebrow">—— 24 小时频道</div>
-      <h1 class="title">二十四时小路电台</h1>
-      <p class="sub">这里收录了小路全部的直播回放。随时打开都在直播中，自动排期、自动去重，不重复。</p>
+      <h1 class="title" id="live-title">二十四时小路电台</h1>
+      <p class="sub" id="live-sub">这里收录了小路全部的直播回放。随时打开都在直播中，自动排期、自动去重，不重复。</p>
 
       <div class="actions">
         <button class="btn primary" data-action="unmute">进入直播</button>
         <button class="btn ghost" id="btn-random">随机一场</button>
         <button class="btn ghost" data-action="resync">回到直播</button>
+      </div>
+
+      <!-- 分段数据状态 + 手动更新入口。放在列表上方而不是页脚：
+           分段覆盖率与「上次更新」是判断数据新不新的依据，得一眼看到。 -->
+      <div class="data-bar">
+        <div class="data-row">
+          <div class="data-info">
+            <div class="data-main" id="seg-cov">分段数据载入中…</div>
+            <div class="data-sub" id="seg-when"></div>
+          </div>
+          <button class="btn primary data-btn" id="btn-seg-refresh" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M21 4v5.5h-5.5"/></svg>
+            <span id="seg-btn-text">更新数据</span>
+          </button>
+        </div>
+        <!-- 识别进度：只在真的在跑的时候出现，数据全部来自分析循环的实时上报 -->
+        <div class="data-progress" id="seg-prog" hidden>
+          <div class="dp-track"><div class="dp-fill" id="seg-prog-fill"></div></div>
+          <div class="dp-text" id="seg-prog-text"></div>
+        </div>
       </div>
 
       <div class="filters">
@@ -66,6 +92,8 @@
       </div>
 
       <div class="net-alert" id="net-alert" hidden></div>
+      <div class="net-alert" id="station-empty" hidden></div>
+      <div class="mixed-note" id="mixed-note" hidden></div>
 
       <div class="list-head">
         <div>
@@ -100,14 +128,31 @@
       <div class="stat" id="meta-line" style="margin-top:18px"></div>
     </section>
 
+    <section class="view" id="view-multi">
+      <div class="eyebrow">—— 监控室</div>
+      <h1 class="title">同时看多路直播</h1>
+      <p class="sub">每格一位主播，点格子右上角可以放大；声音一次只开一路（点 🔊 独奏），
+        免得几路混在一起。未开播的格子会显示封面与状态。</p>
+      <div class="multi-bar">
+        <button class="btn small ghost" id="multi-refresh" type="button">刷新开播状态</button>
+        <label class="multi-qn">画质
+          <select id="multi-qn">
+            <option value="min" selected>省流量（最低档）</option>
+            <option value="80">720P</option>
+            <option value="250">超清</option>
+            <option value="10000">原画</option>
+          </select>
+        </label>
+        <span class="multi-note" id="multi-note"></span>
+      </div>
+      <div class="multi-grid" id="multi-grid"></div>
+    </section>
+
     <section class="view" id="view-broadcast">
       <div class="eyebrow">—— 直播间</div>
       <div class="live-card live-status-card">
         <div class="live-card-h">直播状态</div>
         <div class="live-info" id="live-info">正在获取开播状态…</div>
-        <label class="live-qn" id="live-qn-box" hidden>清晰度
-          <select id="live-qn"></select>
-        </label>
       </div>
 
       <div class="live-card live-chat-card">
@@ -117,7 +162,7 @@
         </div>
       </div>
 
-      <div class="live-card">
+      <div class="live-card" id="live-send-card">
         <div class="live-card-h">发弹幕
           <button class="btn small ghost live-wheel-btn" id="wheel-toggle" type="button">独轮车</button>
         </div>
@@ -130,6 +175,14 @@
         <div class="live-send">
           <input id="live-msg" maxlength="30" placeholder="发条弹幕吧（最多 30 字）">
           <button class="btn small primary" id="live-send">发送</button>
+          <button class="btn small ghost" id="live-msg-save" type="button"
+                  title="把输入框里的内容存为常用">＋</button>
+        </div>
+        <!-- 常用弹幕：点一下直接发出去，不用再打字。编辑模式下点标签即删除。 -->
+        <div class="quick-row" id="quick-row" hidden>
+          <span class="quick-label" id="quick-label">常用</span>
+          <div class="quick-chips" id="quick-chips"></div>
+          <button class="quick-edit" id="quick-edit" type="button" hidden>编辑</button>
         </div>
         <div class="live-result" id="live-result"></div>
       </div>
@@ -141,6 +194,7 @@
           </div>
           <p class="live-note">循环发送同一条弹幕。刷屏有被 B 站限流或封禁弹幕权限的风险，
             请节制；连续 3 次发送失败会自动停止。</p>
+          <p class="live-note wheel-motto" id="wheel-motto"></p>
           <div class="live-send">
             <input id="wheel-msg" maxlength="30" placeholder="要循环发送的弹幕">
           </div>
@@ -182,6 +236,34 @@
         </thead>
         <tbody id="sch-rows"></tbody>
       </table>
+    </section>
+
+    <section class="view" id="view-weibo">
+      <div class="eyebrow">—— 微博</div>
+      <h1 class="title sm" id="wb-title">微博</h1>
+      <p class="sub" id="wb-sub">这里显示当前板块主播的微博。</p>
+
+      <div class="wb-note" id="wb-note" hidden></div>
+
+      <div class="wb-profile" id="wb-profile" hidden></div>
+
+      <div class="wb-list" id="wb-list"></div>
+
+      <details class="wb-paste" id="wb-paste">
+        <summary>也可以手动粘贴微博 Cookie</summary>
+        <p class="wb-tip">
+          在浏览器里登录微博后，按 F12 → Network → 随便点一个请求 → 找到
+          <b>Cookie</b> 那一行，整行复制粘贴到这里即可。Cookie 只存在你本机。
+        </p>
+        <textarea id="wb-cookie" rows="3" placeholder="SUB=…; SUBP=…; SSOLoginState=…"></textarea>
+        <div class="qp-btns">
+          <button class="btn small primary" id="wb-cookie-save" type="button">保存并使用</button>
+          <button class="btn small ghost" id="wb-cookie-clear" type="button">清除</button>
+        </div>
+        <div class="live-result" id="wb-cookie-state"></div>
+      </details>
+
+      <div class="wb-foot" id="wb-foot" hidden></div>
     </section>
 
     <section class="view" id="view-categories">
@@ -240,18 +322,39 @@
         <div class="live-result" id="seg-state"></div>
       </div>
       <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">回放清单（自动获取）
+          <button class="btn small ghost live-wheel-btn" id="series-refresh" type="button">重新获取</button>
+        </div>
+        <p class="live-note">回放清单按<b>主播主页 → 合集和系列 → 系列·直播回放</b>自动获取，
+          只需要 UID —— 换成别的主播也一样。拿不到时点「重新获取」，或等它自己重试；
+          也可以在 data/stations.json 里手填 series_id 强制指定某个系列。</p>
+        <div class="live-result" id="series-state"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">从浏览器一键启动</div>
-        <p class="live-note">浏览器不能直接运行 EXE，所以要注册一个自定义协议（只写当前用户，
-          不需要管理员）。注册后把下面的链接<b>拖到书签栏</b>：以后点这个书签就能启动本程序
-          —— 没在跑就启动，已在跑就把页面打开。</p>
+        <p class="live-note">把下面那条链接<b>拖到书签栏</b>，以后点书签就能进电台 ——
+          <b>程序没在运行时会自动把它启动起来</b>（所以这块的注册项别取消）。</p>
+        <label class="seg-auto">
+          <input type="checkbox" id="proto-direct">
+          直连模式（点击零提示，<b>但不能启动程序</b>：程序没跑时点它会打不开）
+        </label>
+        <p class="live-note" id="proto-hint"></p>
         <p class="proto-row">
-          <a class="proto-link" id="proto-link" href="#" draggable="true">▶ 启动小路电台</a>
+          <a class="proto-link" id="proto-link" href="#" draggable="true">▶ 打开小路电台</a>
         </p>
-        <div class="qp-btns">
+        <div class="qp-btns" id="proto-regbtns">
           <button class="btn small primary" id="proto-reg" type="button">注册 / 修复</button>
           <button class="btn small ghost" id="proto-unreg" type="button">取消注册</button>
         </div>
         <div class="live-result" id="proto-state"></div>
+
+        <p class="live-note" style="margin-top:16px">想要「一点就进、<b>全程没有任何提示</b>」：
+          <b>创建桌面快捷方式</b>最直接 —— 双击它就会启动程序并打开网页（程序已经在跑时
+          就直接把页面打开）。它不经过浏览器，所以不存在任何确认框。</p>
+        <div class="qp-btns">
+          <button class="btn small primary" id="shortcut-create" type="button">创建桌面快捷方式</button>
+        </div>
+        <div class="live-result" id="shortcut-state"></div>
       </div>
     </section>
 
@@ -372,9 +475,9 @@
 
     <div class="credits">
       非官方粉丝站，内容版权归 UP 主
-      <a href="https://space.bilibili.com/1512246445" target="_blank" rel="noopener">四时小路Komichi</a>
+      <a id="cr-name" href="https://space.bilibili.com/1512246445" target="_blank" rel="noopener">四时小路Komichi</a>
       所有，视频流由本站播放器经 B 站接口代理播放（页内不含弹幕轨道）。<br>
-      数据来源：<a href="https://space.bilibili.com/1512246445/lists/5157110?type=series" target="_blank" rel="noopener">直播回放系列</a>
+      数据来源：<a id="cr-src" href="https://space.bilibili.com/1512246445/lists/5157110?type=series" target="_blank" rel="noopener">直播回放系列</a>
       <br><button id="btn-quit" type="button" style="margin-top:10px;background:none;border:0;padding:0;color:inherit;opacity:.5;font:inherit;text-decoration:underline;cursor:pointer">停止本地服务</button>
     </div>
   </aside>
@@ -397,12 +500,12 @@
       <path d="M10 18.2a2.2 2.2 0 0 0 4 0" fill="none" stroke="currentColor"
             stroke-width="1.7" stroke-linecap="round"/>
     </svg>
-    <span class="status-fab-text">小路状态</span>
+    <span class="status-fab-text" id="status-fab-text">小路状态</span>
   </button>
 
   <div class="status-panel" id="status-panel" hidden>
     <div class="status-panel-h">
-      <span>小路状态</span>
+      <span id="status-panel-title">小路状态</span>
       <div class="status-panel-tools">
         <button class="status-mini" id="status-refresh" type="button" title="刷新">刷新</button>
         <button class="status-mini" id="status-close" type="button" title="收起">收起</button>

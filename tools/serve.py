@@ -25,6 +25,7 @@
 import argparse
 import base64
 import hashlib
+import html
 import json
 import os
 import queue
@@ -33,6 +34,7 @@ import shutil
 import socket
 import ssl
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -97,6 +99,82 @@ def setup_bundled_ffmpeg():
     return ""
 
 
+def _read_json_file(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return d
+    except Exception:
+        return None
+
+
+STATIONS_VERSION = 2       # v2：series_id 从「必填」改成「可选覆盖」（默认自动发现）
+
+
+def _merge_stations_file(path, old):
+    """重新释放网页时保住用户自定义的主播（stations.json 是用户的配置，不是发布物）。
+
+    规则：以**内置这份为底**（新加的主播/字段能到位），再把用户那份按 id 盖上去。
+    用户自己加的主播一定保留 —— 一次升级不该抹掉用户配置。
+
+    **但「用户那份」不等于「用户改过」**：升级时它往往只是上一版打包出来的默认值。
+    v2 起 series_id 从「必填」改成「可选覆盖」，上一版留在用户机上的 5157110 就是这种
+    陈旧默认 —— 照「用户优先」保住它，主站会一直显示「来源：手填」而拿不到自动发现。
+    所以按文件里的 _version 区分：
+      · _version >= 2（用户在新语义下写过）：逐字段用户优先
+      · 更早（含没有版本号的）：内置那份**整体**生效（不吃陈旧默认），
+        只额外保留用户自己加进来的主播
+    """
+    olds = (old or {}).get("stations") if isinstance(old, dict) else None
+    if not isinstance(olds, list) or not olds:
+        return
+    old_ver = 0
+    try:
+        old_ver = int((old or {}).get("_version") or 0)
+    except (TypeError, ValueError):
+        old_ver = 0
+    new = _read_json_file(path)
+    if not isinstance(new, dict):
+        return
+    base = [x for x in (new.get("stations") or []) if isinstance(x, dict) and x.get("id")]
+    by_id = dict((x["id"], x) for x in base)
+    order = [x["id"] for x in base]
+    for u in olds:
+        if not isinstance(u, dict) or not u.get("id"):
+            continue
+        if u["id"] in by_id:
+            if old_ver >= STATIONS_VERSION:
+                m = dict(by_id[u["id"]])
+                m.update(u)                # 新语义下用户改过：用户的值优先
+                by_id[u["id"]] = m
+            # 旧版本：内置那份生效（见上面注释）
+        else:
+            by_id[u["id"]] = u             # 用户自己加的主播，任何时候都留
+            order.append(u["id"])
+    out = dict(new)
+    out["stations"] = [by_id[i] for i in order]
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def _merge_series_cache_file(path, old):
+    """回放来源缓存同样保住：用户机上已经发现过的结果比内置快照新，省一次接口往返。"""
+    if not isinstance(old, dict) or not old:
+        return
+    new = _read_json_file(path)
+    if not isinstance(new, dict):
+        new = {}
+    new.update(old)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(new, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
 def unpack_web(appdir):
     """把 EXE 内置的网页文件释放到 appdir\\www，返回该目录；失败返回 None。
 
@@ -129,6 +207,8 @@ def unpack_web(appdir):
         # 重新释放前先留住用户机上算出来的分段：内置的那份只是发布时的快照，
         # 覆盖会把「新回放自动分段」的成果抹回旧快照（实测过）。
         old_seg = _read_segments_file(os.path.join(dst, "data", "segments.js"))
+        old_st = _read_json_file(os.path.join(dst, "data", "stations.json"))
+        old_sc = _read_json_file(os.path.join(dst, "data", "series_cache.json"))
         for name in WEB_ITEMS:
             s = os.path.join(src, name)
             d = os.path.join(dst, name)
@@ -138,6 +218,9 @@ def unpack_web(appdir):
                 shutil.copy2(s, d)
         if old_seg:
             _merge_segments_file(os.path.join(dst, "data", "segments.js"), old_seg)
+        # 用户自定义的主播 / 已发现的回放系列同样不能被覆盖掉
+        _merge_stations_file(os.path.join(dst, "data", "stations.json"), old_st)
+        _merge_series_cache_file(os.path.join(dst, "data", "series_cache.json"), old_sc)
         with open(os.path.join(dst, "www_version.txt"), "w", encoding="utf-8") as f:
             f.write(want)
         return dst
@@ -199,6 +282,322 @@ if FROZEN:
 
 MID = "1512246445"          # 四时小路Komichi
 ROOM_ID = "1700301235"      # 直播间真实房间号（用 get_status_info_by_uids 查到）
+
+# ---------------------------------------------------------------- 主播注册表
+# 「看谁的内容」由 data/stations.json 决定，改文件即可，不需要改代码。
+# 请求带 ?station=<id|mid|房间号> 时，当前线程就切到那一位；不带则用主站。
+STATIONS_FILE = os.path.join(ROOT, "data", "stations.json")
+_STATIONS = {"at": 0.0, "data": None}
+_STATIONS_LOCK = threading.Lock()
+_CUR = threading.local()
+
+
+def load_stations(force=False):
+    """读注册表（30 秒缓存）。文件缺失或损坏时退回只含主站的内置表，保证永远可用。"""
+    with _STATIONS_LOCK:
+        if not force and _STATIONS["data"] and time.time() - _STATIONS["at"] < 30:
+            return _STATIONS["data"]
+    out = []
+    try:
+        with open(STATIONS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        items = raw.get("stations") if isinstance(raw, dict) else raw
+        out = [s for s in (items or []) if isinstance(s, dict) and s.get("id")]
+    except Exception:
+        out = []
+    if not out:
+        out = [{"id": "komichi", "name": "四时小路Komichi", "short": "四时小路",
+                "mid": MID, "room": ROOM_ID, "series_id": SERIES_ID,
+                "tag": "", "site": "", "accent": "#ff3b4e", "main": True}]
+    if not any(s.get("main") for s in out):
+        out[0]["main"] = True
+    for s in out:
+        s.setdefault("series_id", "")
+        s.setdefault("short", s.get("name") or s["id"])
+    with _STATIONS_LOCK:
+        _STATIONS["data"] = out
+        _STATIONS["at"] = time.time()
+    return out
+
+
+def main_station():
+    for s in load_stations():
+        if s.get("main"):
+            return s
+    return load_stations()[0]
+
+
+def find_station(key):
+    """key 可以是 id / mid / 房间号；找不到（或空）返回 None。"""
+    key = str(key or "").strip()
+    if not key:
+        return None
+    for s in load_stations():
+        if key in (str(s.get("id")), str(s.get("mid")), str(s.get("room"))):
+            return s
+    return None
+
+
+def use_station(key):
+    """把当前请求绑定到某位主播（HTTP 线程入口调用）。"""
+    _CUR.station = find_station(key)
+
+
+def cur_station():
+    return getattr(_CUR, "station", None) or main_station()
+
+
+def cur_mid():
+    return str(cur_station().get("mid") or MID)
+
+
+def cur_room():
+    return str(cur_station().get("room") or ROOM_ID)
+
+
+# ---- 回放来源：从「主页 → 合集和系列 → 系列」自动发现 ------------------------
+# 端点是空间页自己发的那个请求：
+#   GET https://api.bilibili.com/x/polymer/web-space/seasons_series_list?mid=<mid>
+# 注意路径是 web-space（连字符）。写成 /x/polymer/web/space/... 会 404 ——
+# 这就是最初死活找不到的原因。另：x/series/archives 只能「已知 series_id 后取归档」，
+# 不能用来列出系列，所以顺序必须是「先列系列 → 再取归档」。
+SERIES_CACHE_FILE = os.path.join(ROOT, "data", "series_cache.json")
+_SERIES_LOCK = threading.Lock()
+_SERIES_WARM = {"done": False, "running": False}
+_SERIES_WARM_LOCK = threading.Lock()
+SERIES_OK_TTL = 24 * 3600     # 发现成功：一天内不重复打接口
+SERIES_FAIL_TTL = 600         # 发现失败：10 分钟后再试，别把风控惹急
+
+
+def _series_cache_read():
+    try:
+        with open(SERIES_CACHE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _series_cache_write(d):
+    # 直接覆盖写，不用「写临时文件再原子替换」：本机把删除类操作劫持到回收站且 fail-closed，
+    # 替换有可能失败；这个缓存很小，直接写足够。
+    try:
+        os.makedirs(os.path.dirname(SERIES_CACHE_FILE), exist_ok=True)
+        with open(SERIES_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
+
+
+def discover_series(mid):
+    """列出一个 UP 的「合集和系列」，挑出直播回放那个系列。
+
+    返回 {series_id, name, total, kind, candidates}；一个系列都没有时抛异常。
+    """
+    mid = str(mid or "").strip()
+    if not mid:
+        raise RuntimeError("缺少 UID")
+    url = ("https://api.bilibili.com/x/polymer/web-space/seasons_series_list"
+           "?mid=%s&page_size=20&page_num=1&web_location=333.1387" % mid)
+    d = bili_get(url, "https://space.bilibili.com/%s/lists" % mid)
+    if d.get("code") != 0:
+        raise RuntimeError("系列列表接口 code=%s %s" % (d.get("code"), d.get("message")))
+    items = (d.get("data") or {}).get("items_lists") or {}
+    cands = []
+    for kind, key in (("series", "series_list"), ("season", "seasons_list")):
+        for it in (items.get(key) or []):
+            if not isinstance(it, dict):
+                continue
+            meta = it.get("meta") or it
+            sid = meta.get("series_id") or meta.get("season_id") or it.get("id")
+            if not sid:
+                continue
+            cands.append({"id": str(sid),
+                          "name": str(meta.get("name") or it.get("name") or ""),
+                          "total": int(meta.get("total") or it.get("total") or 0),
+                          "kind": kind})
+    if not cands:
+        raise RuntimeError("这位主播的「合集和系列」里还没有系列")
+    # 站上默认就叫「直播回放」；没有同名的就取条数最多的那个（最像回放合集）
+    replay = [c for c in cands if "回放" in c["name"]]
+    pick = max(replay or cands, key=lambda c: c["total"])
+    return {"series_id": pick["id"], "name": pick["name"], "total": pick["total"],
+            "kind": pick["kind"], "candidates": cands}
+
+
+def resolve_series(st=None, allow_network=False, force=False):
+    """决定当前主播「用哪个系列当回放来源」。
+
+    优先级：stations.json 里手填的 series_id（可选的强制覆盖）> 自动发现（带缓存）。
+    自动发现失败不抛异常 —— 结果里带 error，页面才能说清原因而不是留一片空白。
+    已缓存到 id 时即使超过 TTL 也继续用它（只是顺带重试）：一次网络抖动不该把频道清空。
+    """
+    st = st or cur_station()
+    conf = str(st.get("series_id") or "").strip()
+    if conf:
+        return {"series_id": conf, "source": "config", "name": "", "total": 0,
+                "kind": "", "at": 0, "error": ""}
+    mid = str(st.get("mid") or "")
+    with _SERIES_LOCK:
+        cache = _series_cache_read()
+    hit = cache.get(mid) or {}
+    old = str(hit.get("series_id") or "")
+    ttl = SERIES_OK_TTL if old else SERIES_FAIL_TTL
+    fresh = bool(hit) and (time.time() - float(hit.get("at") or 0)) < ttl
+    if (fresh and not force) or not allow_network:
+        return {"series_id": old, "source": "auto" if old else "pending",
+                "name": hit.get("name") or "", "total": int(hit.get("total") or 0),
+                "kind": hit.get("kind") or "", "at": hit.get("at") or 0,
+                "error": "" if (old or fresh) else (hit.get("error") or "")}
+    try:
+        r = discover_series(mid)
+        rec = {"series_id": r["series_id"], "name": r["name"], "total": r["total"],
+               "kind": r["kind"], "at": time.time(), "error": ""}
+    except Exception as e:
+        # 失败时保留旧值（如果有）：宁可继续用上一次发现的系列，也不要让频道空掉
+        rec = {"series_id": old, "name": hit.get("name") or "",
+               "total": int(hit.get("total") or 0), "kind": hit.get("kind") or "",
+               "at": hit.get("at") or 0, "error": str(e)}
+    with _SERIES_LOCK:
+        cache = _series_cache_read()
+        cache[mid] = rec
+        _series_cache_write(cache)
+    return {"series_id": rec["series_id"], "source": "auto" if rec["series_id"] else "pending",
+            "name": rec.get("name") or "", "total": int(rec.get("total") or 0),
+            "kind": rec.get("kind") or "", "at": rec.get("at") or 0,
+            "error": rec.get("error") or ""}
+
+
+def cur_series():
+    """当前主播的回放系列 ID。这条路径只读缓存，不打接口（请求线程里不做网络往返）。"""
+    return resolve_series(cur_station(), allow_network=False)["series_id"]
+
+
+def _series_warmup():
+    """后台逐个主播发现回放系列（错开间隔，避免触发风控 412）。
+
+    新用户只填 name + UID 时，回放清单全靠这一步补齐。
+    """
+    try:
+        time.sleep(1.5)                     # 让启动流程先走完
+        for st in load_stations():
+            if str(st.get("series_id") or "").strip():
+                continue                    # 手填过就尊重它，不去打扰接口
+            try:
+                r = resolve_series(st, allow_network=True)
+                print("[series] %-8s → %s  %s" % (
+                    st.get("short") or st.get("id"), r["series_id"] or "(未发现)",
+                    r.get("error") or ("%s / %s 场" % (r.get("name") or "", r.get("total") or 0))))
+            except Exception as e:
+                print("[series] %s 失败：%s" % (st.get("id"), e))
+            time.sleep(4.0)
+    finally:
+        with _SERIES_WARM_LOCK:
+            _SERIES_WARM["running"] = False
+            _SERIES_WARM["done"] = True
+
+
+def series_kick():
+    """确保「发现各主播回放系列」跑过（幂等，可反复调用）。"""
+    with _SERIES_WARM_LOCK:
+        if _SERIES_WARM["running"]:
+            return False
+        _SERIES_WARM["running"] = True
+    threading.Thread(target=_series_warmup, daemon=True).start()
+    return True
+
+
+def api_series_status():
+    """GET /api/series —— 当前主播的回放来源（含是自动发现的还是手填的）。
+
+    字段名与 station_head()["series"] 保持一致（用 id 而不是 series_id）——
+    前端两处都在读 .id，键名不统一会让它走到「还没拿到」的分支。
+    """
+    st = cur_station()
+    rs = resolve_series(st, allow_network=False)
+    return 200, {"ok": bool(rs["series_id"]), "station": station_head(st),
+                 "series": {"id": rs["series_id"], "series_id": rs["series_id"],
+                            "source": rs["source"], "name": rs.get("name") or "",
+                            "total": rs.get("total") or 0, "kind": rs.get("kind") or "",
+                            "at": rs.get("at") or 0, "error": rs.get("error") or ""},
+                 "cache_file": SERIES_CACHE_FILE}
+
+
+def api_series_refresh(body=None):
+    """POST /api/series/refresh —— 强制重新发现（改了 UID 或换了系列之后用）。
+
+    不带参数只刷当前主播；body 里 all=true 则刷全部（每个之间留间隔防风控）。
+    """
+    body = body or {}
+    every = str(body.get("all") or "").lower() in ("1", "true", "yes")
+    targets = load_stations() if every else [cur_station()]
+    out = []
+    for st in targets:
+        conf = str(st.get("series_id") or "").strip()
+        if conf:
+            out.append({"id": st.get("id"), "series_id": conf, "source": "config",
+                        "error": "", "note": "stations.json 里已手填，未走自动发现"})
+            continue
+        r = resolve_series(st, allow_network=True, force=True)
+        out.append({"id": st.get("id"), "series_id": r["series_id"], "name": r.get("name") or "",
+                    "total": r.get("total") or 0, "source": r["source"],
+                    "error": r.get("error") or ""})
+        if every:
+            time.sleep(4.0)
+    return 200, {"ok": all(not x.get("error") for x in out), "results": out}
+
+
+def station_head(st=None):
+    """给前端用的主播摘要（不含任何敏感信息）。"""
+    st = st or cur_station()
+    rs = resolve_series(st, allow_network=False)
+    return {"id": st.get("id"), "name": st.get("name"), "short": st.get("short"),
+            "mid": st.get("mid"), "room": st.get("room"),
+            "has_programs": bool(rs["series_id"]), "tag": st.get("tag") or "",
+            "site": st.get("site") or "", "accent": st.get("accent") or "",
+            "main": bool(st.get("main")),
+            "weibo": str(st.get("weibo") or ""),
+            # 回放来源：auto=自动发现 / config=stations.json 手填 / pending=还没拿到
+            "series": {"id": rs["series_id"], "source": rs["source"],
+                       "name": rs.get("name") or "", "total": rs.get("total") or 0,
+                       "error": rs.get("error") or ""}}
+
+
+def station_dir(st=None):
+    """数据目录：主站沿用 data/（与历史数据完全兼容），副站放 data/stations/<id>/。"""
+    st = st or cur_station()
+    if st.get("main"):
+        return os.path.join(ROOT, "data")
+    return os.path.join(ROOT, "data", "stations", str(st.get("id")))
+
+
+def station_segments_js(key):
+    """按主播取 segments.js 内容；主站返回 None（继续走静态文件，行为不变）。
+
+    index.html 里那条 <script src="data/segments.js"> 是写死的，只能拿到主站那份。
+    副站的分段在各自目录（data/stations/<id>/segments.js），前端切换主播后
+    会用 ?station= 再取一次覆盖 window.SEGMENTS —— 不覆盖的话，频道会拿主站的
+    cid 去匹配副站的分P，一个都对不上，等于这位主播没有分段。
+    """
+    st = find_station(key)
+    if not st or st.get("main"):
+        return None
+    try:
+        with open(os.path.join(station_dir(st), "segments.js"), encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ("/* %s 还没有分段数据（在设置页点「给最新一期分段」开始积累） */\n"
+                "window.SEGMENTS = {};\n" % st.get("id"))
+
+
+def api_stations():
+    """GET /api/stations —— 主播列表（含各自是否有回放清单）。"""
+    series_kick()          # 还没发现过就在后台补，接口本身不等它
+    return 200, {"ok": True,
+                 "stations": [station_head(s) for s in load_stations()],
+                 "main": (main_station() or {}).get("id")}
+
+
 
 APP_TAG = "komichi-radio"   # /api/ping 的应答标识：启动时用它认出「已经有一个实例在跑」
 
@@ -302,7 +701,13 @@ def api_playurl(query):
     }
 
 
-def api_status():
+def api_status(force=False):
+    """本机登录态。带 ?refresh=1 时绕过缓存（登录/登出之后必须拿到新结果）。"""
+    if not force:
+        with _STATUS_LOCK:
+            hit = _STATUS_CACHE["data"]
+            if hit and (time.time() - _STATUS_CACHE["at"]) < _STATUS_TTL:
+                return 200, dict(hit)
     s = sessdata()
     info = {"logged": bool(s)}
     if s:
@@ -315,6 +720,9 @@ def api_status():
         except Exception as e:
             info["error"] = str(e)
     info["jct"] = bool(load_credentials()[1])
+    with _STATUS_LOCK:
+        _STATUS_CACHE["data"] = dict(info)
+        _STATUS_CACHE["at"] = time.time()
     return 200, info
 
 
@@ -340,9 +748,11 @@ def api_img(raw):
         ct, body = IMG_CACHE[target]
         return 200, ct, body
 
+    # 微博图床（sinaimg.cn）不认 B 站 Referer，按域名换一个
+    ref = "https://weibo.com/" if "sinaimg.cn" in target else REFERER
     try:
         req = urllib.request.Request(target, headers={
-            "User-Agent": UA, "Referer": REFERER, "Accept": "image/*,*/*",
+            "User-Agent": UA, "Referer": ref, "Accept": "image/*,*/*",
         })
         with urlopen(req, 20) as r:
             ct = r.headers.get("Content-Type") or "image/jpeg"
@@ -575,6 +985,20 @@ def load_credentials():
     return sess, jct
 
 
+# 本机登录态（登录名 / 大会员 / 有没有 bili_jct）几乎不变，但页面每次加载都要问
+# 两三次，每次都得打一次 B 站的 nav 接口（实测 100~150ms）。缓存 30 秒，
+# 并在「写凭据 / 登出」时立刻作废 —— 否则刚扫码登录完会看到 30 秒的「未登录」。
+_STATUS_CACHE = {"at": 0.0, "data": None}
+_STATUS_TTL = 30
+_STATUS_LOCK = threading.Lock()
+
+
+def status_cache_clear():
+    with _STATUS_LOCK:
+        _STATUS_CACHE["at"] = 0.0
+        _STATUS_CACHE["data"] = None
+
+
 def save_credential(key, value):
     """写凭据文件并保持另一项不变。文件不出本机目录，行为与 SESSDATA 相同。"""
     if not value or len(value) > 512 or (set(value) & set(" \t\r\n;\"'\\")):
@@ -590,11 +1014,43 @@ def save_credential(key, value):
             f.write("SESSDATA=%s\n" % sess)
         if jct:
             f.write("bili_jct=%s\n" % jct)
+    status_cache_clear()          # 凭据变了：登录态缓存立刻作废
 
 
 DANMAKU_MAX_LEN = 30        # B 站直播弹幕长度上限，超长 B 站自己也会拒
 WHEEL_INTERVAL_MIN = 1.0    # 独轮车最小间隔（秒）：再快就是纯刷屏，只会加速触发风控
 WHEEL_COUNT_MAX = 200       # 独轮车单轮条数上限
+
+# 独轮车的内容把关：命中这些词就不让发。
+# 同一句话循环几十遍，比单条弹幕刺眼得多，也更容易把直播间氛围带坏 ——
+# 这里挡的是骂人 / 人身攻击 / 明显擦边低俗 / 恶俗黑话这类「过于低俗」的内容。
+# 清单刻意保守（宁可漏掉，也不误伤正常玩梗与称呼），要加减词直接改这里。
+WHEEL_BLOCK_WORDS = (
+    # 辱骂 / 人身攻击
+    "傻逼", "沙比", "煞笔", "傻b", "智障", "脑残", "弱智", "白痴",
+    "废物", "蠢货", "蠢材", "蠢猪", "神经病", "有病", "傻子",
+    "尼玛", "尼美", "草泥马", "死妈", "你妈", "妈的", "妈蛋",
+    "滚蛋", "去死", "人渣", "垃圾人", "狗东西", "贱人", "贱货",
+    # 恶俗黑话
+    "nmsl", "cnm", "wcnm", "sb",
+    # 明显低俗 / 擦边
+    "约炮", "一夜情", "援交", "包夜", "裸聊", "福利姬", "痴汉",
+    "走光", "偷拍", "打飞机", "撸管", "自慰", "色情", "情色",
+    "黄片", "黄色", "骚货", "骚逼", "浪货", "婊子", "妓女",
+)
+WHEEL_MOTTO = "我们需要更多匠心手摇的车，高质量小众的车。"
+
+
+def wheel_block_hit(msg):
+    """独轮车内容把关：返回命中的词，没问题返回 None。
+
+    比较前先去掉空格与常见分隔符，「傻 逼」「傻*逼」这类变体也拦得住。
+    """
+    s = re.sub(r"[\s\*\-\._,，。!！？?~～]+", "", str(msg)).lower()
+    for w in WHEEL_BLOCK_WORDS:
+        if w in s:
+            return w
+    return None
 
 
 def _danmaku_ready():
@@ -607,13 +1063,13 @@ def _send_danmaku(msg):
     _, jct = load_credentials()
     body = urllib.parse.urlencode({
         "bubble": "0", "msg": msg, "color": "16777215", "mode": "1",
-        "fontsize": "25", "roomid": ROOM_ID, "rnd": str(int(time.time())),
+        "fontsize": "25", "roomid": cur_room(), "rnd": str(int(time.time())),
         "csrf": jct, "csrf_token": jct,
     }).encode("utf-8")
     sess = load_credentials()[0]
     req = urllib.request.Request("https://api.live.bilibili.com/msg/send", data=body, headers={
         "User-Agent": UA,
-        "Referer": "https://live.bilibili.com/%s" % ROOM_ID,
+        "Referer": "https://live.bilibili.com/%s" % cur_room(),
         "Origin": "https://live.bilibili.com",
         "Content-Type": "application/x-www-form-urlencoded",
         "Cookie": "SESSDATA=%s; bili_jct=%s" % (sess, jct),
@@ -679,6 +1135,11 @@ def api_live_wheel_start(obj):
         return 400, {"error": "弹幕内容不能为空"}
     if len(msg) > DANMAKU_MAX_LEN:
         return 400, {"error": "弹幕最长 %d 个字（当前 %d 个）" % (DANMAKU_MAX_LEN, len(msg))}
+    # 内容把关放在登录校验之前：没登录也该知道这条不合适，而不是先去扫码
+    hit = wheel_block_hit(msg)
+    if hit:
+        return 400, {"error": "这条内容过于低俗（命中「%s」），换一句吧。%s"
+                     % (hit, WHEEL_MOTTO), "blocked": hit}
     try:
         interval = float(obj.get("interval") or 3)
         count = int(obj.get("count") or 20)
@@ -708,8 +1169,9 @@ def api_live_wheel_stop():
 def api_live_wheel_status():
     st = {k: WHEEL[k] for k in ("running", "msg", "interval", "total", "sent",
                                 "last_code", "last_message", "reason")}
-    st["room_id"] = ROOM_ID
+    st["room_id"] = cur_room()
     st["danmaku_ready"] = _danmaku_ready()
+    st["motto"] = WHEEL_MOTTO
     return 200, st
 
 
@@ -729,8 +1191,8 @@ def live_play_url(qn):
         return c
     url = ("https://api.live.bilibili.com/room/v1/Room/playUrl?cid=%s&qn=%s"
            "&platform=web&ptype=8"
-           % (urllib.parse.quote(ROOM_ID), urllib.parse.quote(str(qn))))
-    d = bili_get(url, "https://live.bilibili.com/%s" % ROOM_ID)
+           % (urllib.parse.quote(cur_room()), urllib.parse.quote(str(qn))))
+    d = bili_get(url, "https://live.bilibili.com/%s" % cur_room())
     if d.get("code") != 0:
         raise RuntimeError("B 站返回 code=%s" % d.get("code"))
     data = d.get("data") or {}
@@ -745,14 +1207,17 @@ def live_play_url(qn):
 
 def api_live_playinfo():
     """直播间画面信息：是否开播 + 可选清晰度。前端据此决定要不要接管播放器。"""
-    out = {"room_id": ROOM_ID}
+    out = {"room_id": cur_room(), "mid": cur_mid(), "station": station_head()}
     try:
         live = fetch_live()
     except Exception as e:
         out.update(living=False, error="开播状态获取失败：%s" % e)
         return 200, out
     out.update(living=bool(live.get("living")), title=live.get("title") or "",
-               online=live.get("online") or 0, uname=live.get("uname") or "")
+               online=live.get("online") or 0, uname=live.get("uname") or "",
+               face=live.get("face") or "", cover=live.get("cover") or "",
+               area=live.get("area") or "", start=live.get("start") or 0,
+               url=live.get("url") or "")
     if out["living"]:
         try:
             info = live_play_url(DEFAULT_LIVE_QN)
@@ -771,7 +1236,7 @@ def api_live_stream(handler, query):
     except Exception as e:
         return 502, {"error": "取直播流失败：%s" % e}
     req = urllib.request.Request(media, headers={
-        "User-Agent": UA, "Referer": "https://live.bilibili.com/%s" % ROOM_ID,
+        "User-Agent": UA, "Referer": "https://live.bilibili.com/%s" % cur_room(),
         "Accept": "*/*",
     })
     try:
@@ -848,9 +1313,9 @@ def api_live_danmu_info():
     """弹幕 WebSocket 网关信息：前端直连 wss 收实时弹幕。"""
     sess = load_credentials()[0]
     url = wbi_signed("https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo",
-                     {"id": ROOM_ID, "type": "0"})
+                     {"id": cur_room(), "type": "0"})
     try:
-        d = bili_get(url, "https://live.bilibili.com/%s" % ROOM_ID)
+        d = bili_get(url, "https://live.bilibili.com/%s" % cur_room())
     except Exception as e:
         return 502, {"error": "弹幕网关获取失败：%s" % e}
     if d.get("code") != 0:
@@ -858,7 +1323,7 @@ def api_live_danmu_info():
     data = d.get("data") or {}
     hosts = [{"host": h.get("host"), "wss_port": h.get("wss_port")}
              for h in (data.get("host_list") or []) if h.get("host")]
-    return 200, {"room_id": ROOM_ID, "token": data.get("token") or "",
+    return 200, {"room_id": cur_room(), "token": data.get("token") or "",
                  "hosts": hosts, "logged": bool(sess)}
 
 
@@ -866,11 +1331,22 @@ def api_live_danmu_info():
 # 为什么不让浏览器直连弹幕网关：浏览器握手带不上 bilibili 域的 Cookie，
 # 实测认证后立刻被服务端断开（close 1006）；本机服务端带 Cookie + 官方 Origin
 # 连接则正常。所以由服务端维持 WebSocket、解析后经 SSE 推给页面。
-CHAT_SUBS = []                 # 订阅者队列（每个打开直播间页的浏览器一个）
+# **一位主播一份**：合在一起会让副站的直播间显示别人的弹幕
+# （worker 在后台线程里跑，cur_station() 会回落到主站 —— 必须显式按 sid 取）。
+CHAT = {}                      # sid -> {"subs": [...], "backlog": [...], "worker": {...}}
 CHAT_LOCK = threading.Lock()
-CHAT_WORKER = {"thread": None, "running": False, "popularity": 0, "error": ""}
-CHAT_BACKLOG = []              # 最近若干条，页面刚打开时先补上
 CHAT_BACKLOG_MAX = 30
+
+
+def chat_state(sid=None):
+    sid = str(sid or cur_station().get("id"))
+    with CHAT_LOCK:
+        st = CHAT.get(sid)
+        if st is None:
+            st = {"subs": [], "backlog": [], "worker": {
+                "thread": None, "running": False, "popularity": 0, "error": ""}}
+            CHAT[sid] = st
+        return st
 _BUVID = [None]
 _UID = [None]
 
@@ -957,12 +1433,13 @@ def _bili_pack(body, op, ver=1):
     return struct.pack(">IHHII", 16 + len(body), 16, ver, op, 1) + body
 
 
-def _chat_broadcast(item):
+def _chat_broadcast(sid, item):
+    st = chat_state(sid)
     payload = json.dumps(item, ensure_ascii=False)
     with CHAT_LOCK:
-        CHAT_BACKLOG.append(payload)
-        del CHAT_BACKLOG[:-CHAT_BACKLOG_MAX]
-        subs = list(CHAT_SUBS)
+        st["backlog"].append(payload)
+        del st["backlog"][:-CHAT_BACKLOG_MAX]
+        subs = list(st["subs"])
     for q in subs:
         try:
             q.put_nowait(payload)
@@ -970,7 +1447,7 @@ def _chat_broadcast(item):
             pass
 
 
-def _chat_parse(data):
+def _chat_parse(sid, data):
     off = 0
     while off + 16 <= len(data):
         ln = struct.unpack(">I", data[off:off + 4])[0]
@@ -980,8 +1457,9 @@ def _chat_parse(data):
         op = struct.unpack(">I", data[off + 8:off + 12])[0]
         body = data[off + 16:off + ln]
         if op == 3 and len(body) >= 4:
-            CHAT_WORKER["popularity"] = struct.unpack(">I", body[:4])[0]
-            _chat_broadcast({"type": "popularity", "value": CHAT_WORKER["popularity"]})
+            pop = struct.unpack(">I", body[:4])[0]
+            chat_state(sid)["worker"]["popularity"] = pop
+            _chat_broadcast(sid, {"type": "popularity", "value": pop})
         elif op == 5:
             payload = body
             if ver == 2:
@@ -992,11 +1470,11 @@ def _chat_parse(data):
             elif ver == 3:
                 payload = b""            # brotli：本服务只请求 ver2，出现即忽略
             if payload:
-                _chat_parse_nested(payload)
+                _chat_parse_nested(sid, payload)
         off += ln
 
 
-def _chat_parse_nested(payload):
+def _chat_parse_nested(sid, payload):
     off = 0
     while off + 16 <= len(payload):
         ln = struct.unpack(">I", payload[off:off + 4])[0]
@@ -1010,19 +1488,21 @@ def _chat_parse_nested(payload):
                 if str(j.get("cmd") or "").startswith("DANMU_MSG") and j.get("info"):
                     info = j["info"]
                     who = info[2] or []
-                    _chat_broadcast({"type": "danmaku", "uid": who[0] or 0,
-                                     "uname": who[1] or "", "text": info[1] or ""})
+                    _chat_broadcast(sid, {"type": "danmaku", "uid": who[0] or 0,
+                                          "uname": who[1] or "", "text": info[1] or ""})
             except Exception:
                 pass
         off += ln
 
 
-def _chat_worker():
-    CHAT_WORKER.update(running=True, error="")
+def _chat_worker(sid):
+    st = chat_state(sid)
+    st["worker"].update(running=True, error="")
+    _CUR.station = find_station(sid)      # 后台线程：不绑就会连到主站房间去
     try:
         while True:
             with CHAT_LOCK:
-                if not CHAT_SUBS:
+                if not st["subs"]:
                     break
             sock = None
             try:
@@ -1038,13 +1518,13 @@ def _chat_worker():
                 sock = _ws_handshake(host, port, "/sub", {
                     "Origin": "https://live.bilibili.com", "User-Agent": UA, "Cookie": ck})
                 _ws_send(sock, _bili_pack(json.dumps({
-                    "uid": self_uid(), "roomid": int(ROOM_ID), "proto_ver": 2,
+                    "uid": self_uid(), "roomid": int(cur_room()), "proto_ver": 2,
                     "buvid": buvid3(), "platform": "web", "clientver": "1.14.3",
                     "type": 2, "key": info["token"]}).encode(), 7))
                 last_hb = time.time()
                 while True:
                     with CHAT_LOCK:
-                        if not CHAT_SUBS:
+                        if not st["subs"]:
                             break
                     if time.time() - last_hb > 25:
                         _ws_send(sock, _bili_pack(b"", 2))
@@ -1056,14 +1536,14 @@ def _chat_worker():
                     if opcode is None:
                         raise RuntimeError("网关关闭了连接")
                     if opcode == 2:
-                        _chat_parse(data)
+                        _chat_parse(sid, data)
                     elif opcode == 9:
                         _ws_send(sock, data, opcode=10)
                     elif opcode == 8:
                         raise RuntimeError("网关要求关闭")
             except Exception as e:
-                CHAT_WORKER["error"] = "%s: %s" % (type(e).__name__, e)
-                _chat_broadcast({"type": "state", "text": "弹幕连接中断，正在重试…"})
+                st["worker"]["error"] = "%s: %s" % (type(e).__name__, e)
+                _chat_broadcast(sid, {"type": "state", "text": "弹幕连接中断，正在重试…"})
             finally:
                 if sock:
                     try:
@@ -1072,26 +1552,30 @@ def _chat_worker():
                         pass
             time.sleep(3)                 # 重连间隔
     finally:
-        CHAT_WORKER["running"] = False
+        st["worker"]["running"] = False
 
 
 def chat_subscribe():
+    """订阅**当前请求绑定的那位主播**的弹幕（页面每打开一个直播间就一个订阅）。"""
+    sid = str(cur_station().get("id"))
+    st = chat_state(sid)
     q = queue.Queue(maxsize=200)
     with CHAT_LOCK:
-        CHAT_SUBS.append(q)
-        backlog = list(CHAT_BACKLOG)
-        need_worker = not CHAT_WORKER["running"]
+        st["subs"].append(q)
+        backlog = list(st["backlog"])
+        need_worker = not st["worker"]["running"]
     if need_worker:
-        t = threading.Thread(target=_chat_worker, daemon=True)
-        CHAT_WORKER["thread"] = t
+        t = threading.Thread(target=_chat_worker, args=(sid,), daemon=True)
+        st["worker"]["thread"] = t
         t.start()
     return q, backlog
 
 
-def chat_unsubscribe(q):
+def chat_unsubscribe(sid, q):
+    st = chat_state(sid)
     with CHAT_LOCK:
-        if q in CHAT_SUBS:
-            CHAT_SUBS.remove(q)
+        if q in st["subs"]:
+            st["subs"].remove(q)
 
 
 def api_login_qrcode():
@@ -1156,6 +1640,7 @@ def api_login_poll(key):
 
 
 def api_logout():
+    status_cache_clear()
     if os.path.exists(SESS_FILE):
         try:
             os.remove(SESS_FILE)
@@ -1182,7 +1667,8 @@ def api_logout():
 #     不作为「页面看到旧数据」的来源 —— 前端每次加载都会带 ?refresh=1 绕过它。
 
 SERIES_ID = "5157110"
-PROGRAMS_CACHE = {"at": 0.0, "data": None}
+# 按主播分桶：{station_id: {"at": .., "data": ..}} —— 不分开的话切主播会串数据
+PROGRAMS_CACHE = {}
 PROGRAMS_TTL = 240           # 仅用于并发去重与失败回退，页面加载带 refresh=1 时不生效
 PROGRAMS_LOCK = threading.Lock()
 VIEW_WORKERS = 8             # 详情接口并发数；B 站风控对并发较敏感，8 是实测安全值
@@ -1204,14 +1690,24 @@ def _collect_mod():
 
 
 def fetch_series_archives():
-    """系列内全部投稿（分页拉全），返回 bilibili 原始 archives 列表"""
+    """系列内全部投稿（分页拉全），返回 bilibili 原始 archives 列表
+
+    系列 ID 由 resolve_series 决定（自动发现 / stations.json 覆盖），不再写死。
+    """
+    _st = cur_station()
+    rs = resolve_series(_st, allow_network=True)
+    sid = rs["series_id"]
+    if not sid:
+        raise RuntimeError("还没定位到「%s」的回放系列%s"
+                           % (_st.get("name") or _st.get("id"),
+                              ("：%s" % rs["error"]) if rs.get("error") else ""))
     items = []
     pn = 1
     while True:
         url = ("https://api.bilibili.com/x/series/archives?mid=%s&series_id=%s"
-               "&only_normal=true&sort=desc&pn=%d&ps=30" % (MID, SERIES_ID, pn))
+               "&only_normal=true&sort=desc&pn=%d&ps=30" % (_st["mid"], sid, pn))
         d = bili_get(url, "https://space.bilibili.com/%s/lists/%s?type=series"
-                          % (MID, SERIES_ID))
+                          % (_st["mid"], sid))
         if d.get("code") != 0:
             raise RuntimeError("系列接口 code=%s %s" % (d.get("code"), d.get("message")))
         data = d.get("data") or {}
@@ -1227,7 +1723,11 @@ def fetch_series_archives():
 
 
 def build_programs():
-    """实时构建与 data/programs.json 同构的清单（字段、排序、评分全部对齐）"""
+    """实时构建与 data/programs.json 同构的清单（字段、排序、评分全部对齐）。
+
+    按「当前主播」构建：主站沿用原来的系列，副站用各自的 series_id。
+    """
+    _st = cur_station()
     cm = _collect_mod()
     archives = fetch_series_archives()
     if not archives:
@@ -1313,7 +1813,8 @@ def build_programs():
         p["dm_rank"] = round(rank * 100, 1)
 
     meta = {
-        "mid": MID, "series_id": SERIES_ID, "up_name": "四时小路Komichi",
+        "mid": _st["mid"], "series": resolve_series(_st, allow_network=False),
+        "up_name": _st.get("name") or "", "station": station_head(_st),
         "count": len(programs),
         "part_count": sum(len(p["parts"]) for p in programs),
         "total_duration": sum(p["duration"] for p in programs),
@@ -1332,13 +1833,33 @@ def build_programs():
 
 SEG_LOCK = threading.Lock()
 SEG_JOB = {"running": False, "thread": None, "queue": [], "current": None,
-           "done": [], "log": [], "error": "", "ffmpeg": None, "refine": None}
-SEG_STATE_FILE = os.path.join(APPDIR, "seg_state.json")
+           "done": [], "log": [], "error": "", "ffmpeg": None, "refine": None,
+           # 识别进度：progress 由 auto_segments 的分块循环上报（当前分P 分析到第几秒），
+           # batch 是本批次「第几个投稿 / 共几个」+ 已完成音频秒数，started_at 用来算速率。
+           "progress": {}, "batch": {"total": 0, "done": 0, "done_seconds": 0.0},
+           "started_at": 0.0}
+# 排队时把「当时的节目条目」一起记住。清单是实时抓的，而 data/programs.json 只在
+# collect.py 运行时才更新 —— 刚发布的新回放不在那个文件里，作业会报「节目单里没有」。
+SEG_PROGRAMS = {}
+# 排队时记住这条 bvid 属于哪位主播：worker 是后台线程，靠它把状态与分段写回对的主播目录。
+SEG_JOB["stations"] = {}
+
+
+def seg_state_file(st=None):
+    """分段状态文件（auto / seen_upto / last），每位主播一份。
+
+    合成一份会让「水位线」互相串：主站已经划过的水位线会挡住副站的历史回放，
+    自动分段对副站等于失效。
+    """
+    st = st or cur_station()
+    if st.get("main"):
+        return os.path.join(APPDIR, "seg_state.json")   # 主站沿用原文件，历史状态不丢
+    return os.path.join(station_dir(st), "seg_state.json")
 
 
 def _seg_state():
     try:
-        with open(SEG_STATE_FILE, encoding="utf-8") as f:
+        with open(seg_state_file(), encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
@@ -1346,8 +1867,9 @@ def _seg_state():
 
 def _seg_save_state(st):
     try:
-        os.makedirs(os.path.dirname(SEG_STATE_FILE), exist_ok=True)
-        with open(SEG_STATE_FILE, "w", encoding="utf-8") as f:
+        path = seg_state_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(st, f, ensure_ascii=False)
     except OSError:
         pass
@@ -1370,12 +1892,23 @@ def _seg_module():
     spec = importlib.util.spec_from_file_location("auto_segments_mod", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    if FROZEN:
-        mod.ROOT = ROOT                                    # = %LOCALAPPDATA%\KomichiRadio\www
+    # 数据目录必须跟着「当前主播」走：模块里 DATA 是写死的 ROOT/data，
+    # 不覆盖的话副站的分段会被写进主站的 segments.js（跨主播串数据）。
+    # 主站保持原有路径，行为逐字节不变。
+    st = cur_station()
+    mod.ROOT = ROOT                                        # = %LOCALAPPDATA%\KomichiRadio\www
+    if st.get("main"):
         mod.DATA = os.path.join(ROOT, "data")              # 页面就是从这儿读 segments.js
-        mod.CACHE = os.path.join(APPDIR, ".segcache")
-        mod.WORK = os.path.join(APPDIR, ".segaudio")
-        mod.FEAT = os.path.join(APPDIR, ".segfeat")
+        if FROZEN:
+            mod.CACHE = os.path.join(APPDIR, ".segcache")
+            mod.WORK = os.path.join(APPDIR, ".segaudio")
+            mod.FEAT = os.path.join(APPDIR, ".segfeat")
+    else:
+        base = station_dir(st)
+        mod.DATA = base
+        mod.CACHE = os.path.join(base, ".segcache")
+        mod.WORK = os.path.join(base, ".segaudio")
+        mod.FEAT = os.path.join(base, ".segfeat")
     return mod
 
 
@@ -1406,20 +1939,14 @@ def seg_refine_ready():
     return SEG_JOB["refine"]
 
 
+def segments_file():
+    """本机在用的 segments.js 路径（主站沿用 data/，副站各自一个目录）。"""
+    return os.path.join(station_dir(), "segments.js")
+
+
 def segments_have():
     """已有分段的分P cid 集合 —— 直接读 data/segments.js，不另维护状态。"""
-    try:
-        with open(os.path.join(ROOT, "data", "segments.js"), encoding="utf-8") as f:
-            txt = f.read()
-    except OSError:
-        return set()
-    m = re.search(r"window\.SEGMENTS\s*=\s*(\{.*\})\s*;", txt, re.S)
-    if not m:
-        return set()
-    try:
-        return set(json.loads(m.group(1)).keys())
-    except Exception:
-        return set()
+    return set(_read_segments_file(segments_file()).keys())
 
 
 def _seg_worker():
@@ -1430,6 +1957,9 @@ def _seg_worker():
                 if not SEG_JOB["queue"]:
                     break
                 bvid = SEG_JOB["queue"].pop(0)
+            # worker 跑在后台线程里，线程局部的「当前主播」是空的 —— 不在这里绑一次，
+            # 状态文件和 segments.js 都会落到主站目录去。
+            _CUR.station = find_station((SEG_JOB.get("stations") or {}).get(bvid))
             SEG_JOB["current"] = bvid
             SEG_JOB["log"] = []
             SEG_JOB["error"] = ""
@@ -1440,12 +1970,47 @@ def _seg_worker():
                     # 日志只留最近 12 行：页面上够看，也不会把状态接口撑大
                     SEG_JOB["log"] = (SEG_JOB["log"] + [str(msg).strip()])[-12:]
 
-                res = mod.process_bvid(bvid, logf=logf)
+                # 分析过程的明细（每个分P 的秒数/段数/阈值）走的是模块内的 log()，
+                # 默认打到 stdout（打包版被重定向进 log.txt）。接到面板里来，
+                # 网页上才看得到「跑到哪、切了几段」，而不是只有一行标题。
+                def _prog_sink(d):
+                    # 进度用「合并」而不是覆盖：投稿级信息（标题/第几个分P）在 process_program
+                    # 报、分P 内的秒数在 process_part 报，两边合起来才是完整的一条。
+                    cur = SEG_JOB["progress"]
+                    if d.get("cid") and cur.get("cid") and d["cid"] != cur["cid"]:
+                        # 换了分P：把上一个分P 的整份工作量计入「已完成」，
+                        # 页面用它除以已耗时来估算剩余时间
+                        SEG_JOB["batch"]["done_seconds"] += seg_work_done(cur)
+                    cur.update(d)
+
+                mod.LOG_SINK[0] = logf
+                mod.PROGRESS_SINK[0] = _prog_sink
+
+                prog = SEG_PROGRAMS.get(bvid)
+                res = mod.process_bvid(bvid, logf=logf,
+                                       programs=[prog] if prog else None)
                 res["at"] = int(time.time())
                 if not res.get("ok"):
                     SEG_JOB["error"] = res.get("error") or "分段失败"
                 with SEG_LOCK:
                     SEG_JOB["done"] = (SEG_JOB["done"] + [res])[-10:]
+                    # 这一整场算完了：计入批次进度，并把最后一份工作量计入「已完成」
+                    # （前面的分P 已在进度回调里逐个累计；速率 = 已完成 / 已耗时）
+                    SEG_JOB["batch"]["done"] += 1
+                    SEG_JOB["batch"]["done_seconds"] += seg_work_done(SEG_JOB["progress"])
+                    SEG_JOB["progress"] = {}
+                # 「上次更新时间」必须跨重启保留（内存里的 done 会随进程消失），
+                # 所以每次都写回状态文件。不能用 segments.js 的 mtime 代替：
+                # 每次启动/换版本都会重写那个文件，mtime 会变成「刚刚」。
+                st = _seg_state()
+                st["last"] = {
+                    "at": res["at"], "ok": bool(res.get("ok")),
+                    "title": res.get("title") or bvid, "bvid": bvid,
+                    "processed": res.get("processed") or 0,
+                    "skipped": res.get("skipped") or 0,
+                    "segments": res.get("segments") or 0,
+                    "error": res.get("error") or ""}
+                _seg_save_state(st)
             except Exception as e:
                 SEG_JOB["error"] = "%s: %s" % (type(e).__name__, e)
             finally:
@@ -1454,16 +2019,27 @@ def _seg_worker():
         SEG_JOB["running"] = False
 
 
-def segments_enqueue(bvid):
+def segments_enqueue(bvid, program=None):
     """把投稿排进分段队列；队列空时顺手把 worker 拉起来。"""
     with SEG_LOCK:
         if bvid in SEG_JOB["queue"] or SEG_JOB["current"] == bvid:
             return False
         if any(d.get("bvid") == bvid and d.get("ok") for d in SEG_JOB["done"]):
             return False                       # 这轮已经成功处理过，别重复排队
+        if program:
+            SEG_PROGRAMS[bvid] = program
+        SEG_JOB.setdefault("stations", {})[bvid] = str(cur_station().get("id"))
         SEG_JOB["queue"].append(bvid)
+        b = SEG_JOB["batch"]
+        if b["done"] >= b["total"]:      # 上一批已经跑完，重新开始计数
+            b["total"] = 0
+            b["done"] = 0
+            b["done_seconds"] = 0.0
+            SEG_JOB["progress"] = {}
+        b["total"] += 1
         if not SEG_JOB["running"]:
             SEG_JOB["running"] = True
+            SEG_JOB["started_at"] = time.time()   # 速率的起算点
             t = threading.Thread(target=_seg_worker, daemon=True)
             SEG_JOB["thread"] = t
             t.start()
@@ -1493,19 +2069,51 @@ def segments_autoscan(programs):
     if not fresh:
         return
     for p in sorted(fresh, key=lambda x: x.get("pubdate") or 0):
-        segments_enqueue(p["bvid"])
+        segments_enqueue(p["bvid"], p)
     st["seen_upto"] = newest
     _seg_save_state(st)
 
 
+def _known_parts():
+    """频道里已知的全部分P cid。
+
+    优先用页面上那份实时清单 —— PROGRAMS_CACHE 里已经有，读它不会打接口；
+    没有缓存时回退到离线快照 data/programs.json。
+    """
+    sid = str(cur_station().get("id"))
+    data = (PROGRAMS_CACHE.get(sid) or {}).get("data")
+    if not data:
+        try:
+            with open(os.path.join(station_dir(), "programs.json"), encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return set()
+    return set(str(x["cid"])
+               for p in (data.get("programs") or [])
+               for x in (p.get("parts") or []) if x.get("cid") is not None)
+
+
 def api_segments_status():
     st = _seg_state()
-    have = segments_have()
-    try:
-        with open(os.path.join(ROOT, "data", "programs.json"), encoding="utf-8") as f:
-            total = sum(len(p["parts"]) for p in json.load(f)["programs"])
-    except Exception:
-        total = len(have)
+    seg = _read_segments_file(segments_file())
+    # 分子分母必须同源：segments.js 里会含实时清单的新分P，而 programs.json 只是离线快照，
+    # 两边不同步时旧写法（分子取 segments.js 键数、分母取 programs.json 分P 数）
+    # 会把覆盖率显示成 111%（68/61）。取并集后 have 恒 ≤ total。
+    total = len(_known_parts() | set(seg))
+    # 进度与「还剩多久」：剩余秒数 = 当前分P 没分析完的 + 排队里每个投稿的全部分P 时长；
+    # 速率由页面拿 done_seconds / elapsed 自己算，服务端只提供原始数字。
+    prog = SEG_JOB["progress"]
+    b = SEG_JOB["batch"]
+    todo = max(0.0, float(prog.get("audio_total") or 0) * float(prog.get("phases") or 1)
+               - seg_work_done(prog))
+    # 排队里的投稿按「音频 1 份 + 精修 1 份」估（与模块内的工作量口径一致）；
+    # 精修实际可能回退，宁可让剩余时间估长一点，也不要让用户等得比提示的久
+    q_phases = 2 if seg_refine_ready() else 1
+    for bv in SEG_JOB["queue"]:
+        p = SEG_PROGRAMS.get(bv)
+        if p:
+            todo += q_phases * sum(float(x.get("duration") or 0) for x in p.get("parts") or [])
+    elapsed = (time.time() - SEG_JOB["started_at"]) if SEG_JOB["started_at"] else 0.0
     return 200, {
         "auto": bool(st.get("auto")),
         "ffmpeg": seg_ffmpeg(),
@@ -1516,8 +2124,15 @@ def api_segments_status():
         "done": list(SEG_JOB["done"]),
         "log": list(SEG_JOB["log"]),
         "error": SEG_JOB["error"],
-        "coverage": {"have": len(have), "total": total},
+        "coverage": {"have": len(seg), "total": total,
+                     "segments": sum(len(v) for v in seg.values())},
+        "last": st.get("last") or {},
         "seen_upto": st.get("seen_upto") or 0,
+        "progress": dict(prog),
+        "batch": {"total": b["total"], "done": b["done"]},
+        "elapsed": round(elapsed, 1),
+        "done_seconds": round(b["done_seconds"] + seg_work_done(prog), 1),
+        "todo_seconds": round(todo, 1),
     }
 
 
@@ -1529,6 +2144,61 @@ def api_segments_auto(on):
         st["seen_upto"] = int(time.time())
     _seg_save_state(st)
     return 200, {"ok": True, "auto": bool(on), "seen_upto": st.get("seen_upto")}
+
+
+def seg_work_done(p):
+    """已完成的工作量。统一口径：音频已分析秒数 + 精修按同样长度折算
+    （精修与音频并行，两边各自上报，合起来才是进度）。"""
+    at = float(p.get("audio_total") or 0)
+    if not at:
+        return min(float(p.get("analyzed") or 0), float(p.get("total") or 0))
+    return min(float(p.get("analyzed") or 0), at) + float(p.get("refine_ratio") or 0) * at
+
+
+def _find_program(bvid):
+    """从最近的实时清单里取节目条目（作业要用；programs.json 可能还没这个投稿）。
+
+    必须按主播取桶：PROGRAMS_CACHE 是 {station_id: {...}}，
+    沿用分桶之前的 PROGRAMS_CACHE["data"] 会直接 KeyError
+    —— 「给最新一期分段」和「更新数据」两个按钮因此都崩过。
+    """
+    sid = str(cur_station().get("id"))
+    with PROGRAMS_LOCK:
+        data = (PROGRAMS_CACHE.get(sid) or {}).get("data")
+    for p in (data or {}).get("programs") or []:
+        if p.get("bvid") == bvid:
+            return p
+    return None
+
+
+def api_segments_refresh():
+    """手动触发：扫一遍清单，把所有还缺分段的分P 所属投稿排队（新回放优先）。
+
+    与 segments_autoscan 的分工：autoscan 只认水位线之后出现的回放（首次开启不排历史，
+    否则一开就排几十场）；这里是用户显式点击，所以历史缺口一起补。
+    """
+    if seg_ffmpeg() == "":
+        return 200, {"ok": False, "error": "未找到 ffmpeg，无法分段"}
+    sid = str(cur_station().get("id"))
+    with PROGRAMS_LOCK:
+        bucket = PROGRAMS_CACHE.get(sid) or {}
+        hit = bucket.get("data")
+        fresh = bool(hit) and (time.time() - float(bucket.get("at") or 0)) < PROGRAMS_TTL
+    programs = (hit or {}).get("programs") if fresh else None
+    if not programs:
+        try:
+            programs = build_programs()["programs"]
+        except Exception as e:
+            return 200, {"ok": False, "error": "取节目单失败：%s" % e}
+    have = segments_have()
+    targets = [p for p in programs
+               if any(str(x["cid"]) not in have for x in p["parts"])]
+    missing = sum(1 for p in targets for x in p["parts"] if str(x["cid"]) not in have)
+    # 排队是单线程串行的，新回放先出炉更有意义
+    targets.sort(key=lambda p: p.get("pubdate") or 0, reverse=True)
+    queued = sum(1 for p in targets if segments_enqueue(p["bvid"], p))
+    return 200, {"ok": True, "queued": queued, "programs": len(targets),
+                 "missing_parts": missing}
 
 
 # ---------------------------------------------------------------- 关掉网页就退出
@@ -1661,53 +2331,220 @@ def protocol_unregister():
     return 200, {"ok": True, "command": protocol_registered()}
 
 
+def _desktop_dir():
+    """桌面目录。可能是 %USERPROFILE%\\Desktop，也可能被 OneDrive 重定向 ——
+    后者只在注册表的 Shell Folders 里能拿到，所以要优先问注册表。"""
+    try:
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders") as k:
+            v = os.path.expandvars(str(winreg.QueryValueEx(k, "Desktop")[0] or ""))
+            if v and os.path.isdir(v):
+                return v
+    except OSError:
+        pass
+    return os.path.join(os.environ.get("USERPROFILE") or os.path.expanduser("~"), "Desktop")
+
+
+def api_shortcut_create(where=""):
+    """创建指向本程序的桌面快捷方式。
+
+    这是「一点启动 + 完全没有任何提示」唯一可靠的做法：快捷方式直接指向 EXE，
+    不经过浏览器，所以不存在「外部程序授权」那一层确认。
+    浏览器书签做不到这一点 —— http:// 无法关联本地程序，而自定义协议必须先过
+    浏览器的授权确认（那是浏览器的安全边界，任何网页都绕不过）。
+    """
+    if not FROZEN:
+        return 400, {"error": "源码运行模式：快捷方式要指向本程序的 EXE，源码运行没有可指向的目标。"}
+    exe = os.path.abspath(sys.executable)
+    if not os.path.isfile(exe):
+        return 500, {"error": "找不到本程序的可执行文件：%s" % exe}
+    d = where or _desktop_dir()
+    if not os.path.isdir(d):
+        return 500, {"error": "目标目录不存在：%s" % d}
+    lnk = os.path.join(d, "二十四时小路电台.lnk")
+
+    def q(s):
+        return str(s).replace("'", "''")
+
+    ps = ("$ws = New-Object -ComObject WScript.Shell; "
+          "$s = $ws.CreateShortcut('%s'); "
+          "$s.TargetPath = '%s'; "
+          "$s.WorkingDirectory = '%s'; "
+          "$s.IconLocation = '%s,0'; "
+          "$s.Description = '二十四时小路电台 · 一点直接进直播间'; "
+          "$s.Save()") % (q(lnk), q(exe), q(os.path.dirname(exe)), q(exe))
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", ps],
+            capture_output=True, timeout=40,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except Exception as e:
+        return 500, {"error": "调用 PowerShell 失败：%s" % e}
+    if r.returncode != 0 or not os.path.isfile(lnk):
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()[:200]
+        return 500, {"error": "创建快捷方式失败：%s" % (err or "未知错误")}
+    return 200, {"ok": True, "path": lnk, "target": exe}
+
+
 def api_protocol_status():
     cmd = protocol_registered()
     return 200, {"supported": FROZEN, "registered": bool(cmd), "command": cmd,
                  "url": PROTOCOL + "://open"}
 
 
-def api_programs(refresh=False):
-    """GET /api/programs —— 实时回放清单。
+# ---- 回放清单的缓存策略：磁盘留一份 + 「先给旧的、后台重抓」 --------------
+# 现抓一个主播的清单要打 30~70 次 B 站接口，实测 1.5~2.6 秒。切换板块时把它挡在
+# 页面面前，就是用户感觉到的「明显卡顿」。所以：
+#   · 每次成功抓取都落盘（data/stations/<id>/programs_cache.json），重启后仍能秒开；
+#   · 页面请求时先把手上这份给出去，只有「过期」时才起后台线程重抓；
+#   · 一份都没有（首次访问该主播）才同步抓 —— 这一步的等待无法避免。
+# 新鲜度对这份数据没有苛刻要求：它是「有哪些回放」，一天也变不了几次，
+# 页面上显示的「实时数据 HH:MM」直接来自 generated_at，用户看得见。
+PROGRAMS_STALE_AFTER = 60          # 秒：比这更新就直接用，连一次上游请求都不发
+_PROGRAMS_BUILDING = {}            # sid -> True（同一主播同时只允许一个重抓在跑）
+_PROGRAMS_BUILD_LOCK = threading.Lock()
 
-    默认走缓存（仅用于并发去重）；页面加载会带 refresh=1 强制重抓。
-    抓取失败时回退上一次结果（如果有），再失败让前端用本地 programs.js。
-    """
-    with PROGRAMS_LOCK:
-        hit = PROGRAMS_CACHE["data"]
-        fresh = hit and (time.time() - PROGRAMS_CACHE["at"]) < PROGRAMS_TTL
-        if fresh and not refresh:
-            out = dict(hit)
-            out["cached"] = True
-            return 200, out
 
+def programs_cache_file(st=None):
+    return os.path.join(station_dir(st), "programs_cache.json")
+
+
+def _read_programs_disk(st):
     try:
-        out = build_programs()
-        out["cached"] = False
-    except Exception as e:
-        with PROGRAMS_LOCK:
-            prev = PROGRAMS_CACHE["data"]
-        if prev:
-            out = dict(prev)
-            out["cached"] = True
-            out["error"] = str(e)
-            return 200, out
-        return 502, {"error": "取回放清单失败：%s" % e}
+        with open(programs_cache_file(st), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) and d.get("programs") else None
+    except Exception:
+        return None
 
+
+def _write_programs_disk(st, data):
+    try:
+        path = programs_cache_file(st)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def _programs_store(sid, st, out):
+    # 「几点了」一律以数据自己的 generated_at 为准：它就印在页面上，
+    # 用写入时刻会让磁盘读到的那份看起来比实际新
+    at = float((out.get("meta") or {}).get("generated_at") or 0) or time.time()
     with PROGRAMS_LOCK:
-        PROGRAMS_CACHE["at"] = time.time()
-        PROGRAMS_CACHE["data"] = out
-    # 拿到最新清单后顺带看看有没有新回放需要分段（失败不影响清单接口）
+        bucket = PROGRAMS_CACHE.setdefault(sid, {"at": 0.0, "data": None})
+        bucket["at"] = at
+        bucket["data"] = out
+    _write_programs_disk(st, out)
+
+
+def _programs_build(sid, st, label):
+    """抓一次并落盘。调用方负责 _PROGRAMS_BUILDING 的置位与清理。"""
+    _CUR.station = st            # 后台线程里线程局部的「当前主播」是空的，得自己绑
+    out = build_programs()
+    out["cached"] = False
+    out["stale"] = False
+    _programs_store(sid, st, out)
+    print("[programs] %s %s：%s 个节目" % (sid, label,
+                                         (out.get("meta") or {}).get("count")))
     try:
         segments_autoscan(out.get("programs") or [])
     except Exception as e:
         print("自动分段检查失败：%s" % e)
-    return 200, out
+    return out
+
+
+def _programs_rebuild(sid, st):
+    """后台重抓。失败只记日志 —— 已经在服务的那份继续用。"""
+    try:
+        _programs_build(sid, st, "后台重抓完成")
+    except Exception as e:
+        print("[programs] %s 后台重抓失败：%s" % (sid, e))
+    finally:
+        with _PROGRAMS_BUILD_LOCK:
+            _PROGRAMS_BUILDING.pop(sid, None)
+
+
+def api_programs(refresh=False, hard=False):
+    """GET /api/programs?[refresh=1][&hard=1] —— 回放清单。
+
+    refresh=1：允许「先给缓存、后台重抓」（页面加载走这条，切换板块才不卡）。
+    hard=1   ：强制同步重抓（发布自检、以及确实要全新数据时用）。
+    一份都没有时无论如何都得同步抓，抓不到才报错。
+    """
+    st = cur_station()
+    sid = str(st.get("id"))
+    now = time.time()
+
+    with PROGRAMS_LOCK:
+        bucket = PROGRAMS_CACHE.setdefault(sid, {"at": 0.0, "data": None})
+        hit = bucket["data"]
+        at = float(bucket["at"] or 0)
+
+    if hard:
+        with _PROGRAMS_BUILD_LOCK:
+            _PROGRAMS_BUILDING[sid] = True
+        try:
+            return 200, _programs_build(sid, st, "强制重抓")
+        except Exception as e:
+            with PROGRAMS_LOCK:
+                prev = (PROGRAMS_CACHE.get(sid) or {}).get("data")
+            if prev:
+                out = dict(prev)
+                out["cached"] = True
+                out["error"] = str(e)
+                return 200, out
+            return 502, {"error": "取回放清单失败：%s" % e}
+        finally:
+            with _PROGRAMS_BUILD_LOCK:
+                _PROGRAMS_BUILDING.pop(sid, None)
+
+    if hit is None:
+        # 进程里没有 → 看磁盘（上次运行、或上次切到这位时留下的那份）
+        disk = _read_programs_disk(st)
+        if disk:
+            hit = disk
+            at = float((disk.get("meta") or {}).get("generated_at") or 0) or 1.0
+            with PROGRAMS_LOCK:
+                bucket["data"] = hit
+                bucket["at"] = at
+
+    if hit is not None:
+        age = (now - at) if at else 1e9
+        out = dict(hit)
+        out["cached"] = True
+        out["stale"] = age > PROGRAMS_STALE_AFTER
+        out["age"] = int(max(0.0, age))
+        if out["stale"]:
+            # 先把旧的给出去，重抓丢到后台 —— 这就是「切换板块不卡」的关键
+            with _PROGRAMS_BUILD_LOCK:
+                if not _PROGRAMS_BUILDING.get(sid):
+                    _PROGRAMS_BUILDING[sid] = True
+                    threading.Thread(target=_programs_rebuild, args=(sid, st),
+                                     daemon=True).start()
+                    out["refreshing"] = True
+        return 200, out
+
+    # 一份都没有：只能同步抓（首次访问该主播，避免不了等一次）
+    with _PROGRAMS_BUILD_LOCK:
+        _PROGRAMS_BUILDING[sid] = True
+    try:
+        return 200, _programs_build(sid, st, "首次抓取")
+    except Exception as e:
+        return 502, {"error": "取回放清单失败：%s" % e}
+    finally:
+        with _PROGRAMS_BUILD_LOCK:
+            _PROGRAMS_BUILDING.pop(sid, None)
 
 
 # ---------------------------------------------------------------- 小路状态
 
-STATUS_CACHE = {"at": 0.0, "data": None}
+# 同样按主播分桶（状态板是小路的副产物，但切人后不能互相覆盖）
+STATUS_CACHE = {}
 STATUS_LOCK = threading.Lock()
 
 
@@ -1722,17 +2559,17 @@ def fetch_live():
     space/wbi/acc/info 无签名时风控 -352；空间投稿类接口 -799 限流。
     """
     d = bili_get("https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids"
-                 "?uids[]=%s" % MID, "https://live.bilibili.com/")
+                 "?uids[]=%s" % cur_mid(), "https://live.bilibili.com/")
     if d.get("code") != 0:
         raise RuntimeError("开播接口 code=%s %s" % (d.get("code"), d.get("message")))
-    info = ((d.get("data") or {}).get(MID)) or {}
+    info = ((d.get("data") or {}).get(cur_mid())) or {}
     if not info:
         raise RuntimeError("开播接口未返回该 uid 的数据")
 
-    room = str(info.get("room_id") or ROOM_ID)
+    room = str(info.get("room_id") or cur_room())
     return {
         "living": int(info.get("live_status") or 0) == 1,
-        "mid": MID,
+        "mid": cur_mid(),
         "room_id": room,
         "url": "https://live.bilibili.com/%s" % room,
         "uname": info.get("uname") or "",
@@ -1762,22 +2599,24 @@ def api_status_board(refresh=False):
     每次都重新问一次接口。STATUS_LOCK 只用来串行化写操作，避免并发请求
     把回退数据互相覆盖。
     """
-    out = {"mid": MID, "cached": False, "at": int(time.time())}
+    out = {"mid": cur_mid(), "cached": False, "at": int(time.time())}
+    sid = str(cur_station().get("id"))
     with STATUS_LOCK:
-        hit = STATUS_CACHE["data"]
+        bucket = STATUS_CACHE.setdefault(sid, {"at": 0.0, "data": None})
+        hit = bucket["data"]
 
     try:
         out["live"] = fetch_live()
     except Exception as e:
         # 接口偶发失败时，退回上一次成功的结果，好过让弹窗空白
         prev = (hit or {}).get("live")
-        out["live"] = prev or {"living": False, "mid": MID, "room_id": ROOM_ID,
-                               "url": "https://live.bilibili.com/%s" % ROOM_ID}
+        out["live"] = prev or {"living": False, "mid": cur_mid(), "room_id": cur_room(),
+                               "url": "https://live.bilibili.com/%s" % cur_room()}
         out["live_error"] = str(e)
     out["ok"] = bool(out.get("live"))
     with STATUS_LOCK:
-        STATUS_CACHE["at"] = time.time()
-        STATUS_CACHE["data"] = out
+        bucket["at"] = time.time()
+        bucket["data"] = out
     return 200, out
 
 
@@ -1800,7 +2639,11 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _sse_chat(self):
-        """把服务端收到的实时弹幕用 SSE 推给页面（浏览器直连网关会被拒，见 chat 段注释）。"""
+        """把服务端收到的实时弹幕用 SSE 推给页面（浏览器直连网关会被拒，见 chat 段注释）。
+
+        按当前板块取：EventSource 带 ?station=，服务端在 do_GET 开头已绑好。
+        """
+        _sid = str(cur_station().get("id"))
         q, backlog = chat_subscribe()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1823,15 +2666,17 @@ class Handler(SimpleHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
             pass                      # 观众关页面 / 切走
         finally:
-            chat_unsubscribe(q)
+            chat_unsubscribe(_sid, q)
         return None
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        # 主播上下文：?station=<id|mid|房间号>，不带则用主站。必须在所有处理之前设置
+        use_station(urllib.parse.parse_qs(parsed.query).get("station", [""])[0])
         q = urllib.parse.parse_qs(parsed.query)
 
         if parsed.path == "/api/status":
-            code, obj = api_status()
+            code, obj = api_status("refresh" in q)
             return self._json(code, obj)
         if parsed.path == "/api/ping":
             # 只回答「我是谁」。给启动时的实例探测用 —— 不能复用 /api/status，
@@ -1891,8 +2736,27 @@ class Handler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/status-board":
             code, obj = api_status_board("refresh" in q)
             return self._json(code, obj)
+        if parsed.path == "/api/stations":
+            return self._json(*api_stations())
+        if parsed.path == "/api/weibo":
+            return self._json(*api_weibo(q))
+        if parsed.path == "/api/weibo/login/poll":
+            return self._json(*api_weibo_login_poll())
+        if parsed.path == "/api/series":
+            return self._json(*api_series_status())
+        if parsed.path == "/data/segments.js":
+            # 带 station 时按主播给；不带（或主站）落回静态文件
+            _txt = station_segments_js(q.get("station", [""])[0])
+            if _txt is not None:
+                _body = _txt.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(_body)))
+                self.end_headers()
+                self.wfile.write(_body)
+                return
         if parsed.path == "/api/programs":
-            code, obj = api_programs("refresh" in q)
+            code, obj = api_programs("refresh" in q, "hard" in q)
             return self._json(code, obj)
         if parsed.path == "/api/segments/status":
             return self._json(*api_segments_status())
@@ -1924,6 +2788,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         """直播弹幕相关接口。凭据走 POST body，不能走 GET —— 会整个进访问日志。"""
         parsed = urllib.parse.urlparse(self.path)
+        use_station(urllib.parse.parse_qs(parsed.query).get("station", [""])[0])
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -1940,19 +2805,31 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_live_credential(obj))
         if parsed.path == "/api/segments/auto":
             return self._json(*api_segments_auto(obj.get("on")))
+        if parsed.path == "/api/segments/refresh":
+            return self._json(*api_segments_refresh())
+        if parsed.path == "/api/series/refresh":
+            return self._json(*api_series_refresh(obj))
         if parsed.path == "/api/page/bye":
             return self._json(*page_bye(str(obj.get("cid") or "anon")))
         if parsed.path == "/api/protocol/register":
             return self._json(*protocol_register())
         if parsed.path == "/api/protocol/unregister":
             return self._json(*protocol_unregister())
+        if parsed.path == "/api/shortcut/create":
+            return self._json(*api_shortcut_create(str(obj.get("dir") or "")))
+        if parsed.path == "/api/weibo/cookie":
+            return self._json(*api_weibo_cookie(obj))
+        if parsed.path == "/api/weibo/logout":
+            return self._json(*api_weibo_logout())
+        if parsed.path == "/api/weibo/login":
+            return self._json(*api_weibo_login_start())
         if parsed.path == "/api/segments/run":
             bvid = str(obj.get("bvid") or "").strip()
             if not bvid:
                 return self._json(400, {"error": "缺少 bvid"})
             if seg_ffmpeg() == "":
                 return self._json(400, {"error": "本机没找到 ffmpeg，无法做分段"})
-            queued = segments_enqueue(bvid)
+            queued = segments_enqueue(bvid, _find_program(bvid))
             return self._json(200, {"ok": True, "queued": queued})
         if parsed.path == "/api/live/send":
             return self._json(*api_live_send(obj))
@@ -2042,6 +2919,709 @@ def bind_server(bind, port, tries=20):
     return None, None
 
 
+
+# ---------------------------------------------------------------- 微博
+#
+# 为什么走本机服务代理：微博对「不带浏览器 cookie 的请求」直接回 HTTP 432（访客风控），
+# 而前端页面直连又会被 CORS 挡住（接口不带跨域头）。所以由本机服务代取。
+#
+# 实测（2026-09-30，用真实浏览器 + 导出 cookie 交叉验证）：
+#   · 不带 cookie              → HTTP 432
+#   · 带访客 cookie            → 200，但正文接口只回一张「登录注册后查看更多微博」的卡片
+#   · 个人资料（昵称/头像/简介）→ 游客就能拿到
+# 所以：资料卡默认可见，正文要登录态；登录态存本机文件（与 SESSDATA 同级）。
+
+WEIBO_FILE = os.path.join(APPDIR, "weibo.txt")
+WEIBO_API = "https://m.weibo.cn/api/container/getIndex"
+WEIBO_DESKTOP_API = "https://weibo.com/ajax"
+WEIBO_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148")
+# 桌面站的 UA 必须和登录窗口里那个浏览器一致，否则接口会因为「换了客户端」把
+# 登录态当异常会话处理。
+WEIBO_UA_DESKTOP = UA
+WEIBO_TTL_OK = 300          # 成功结果缓存 5 分钟（微博接口慢，且容易触发风控）
+WEIBO_TTL_FAIL = 60
+_WEIBO_LOCK = threading.Lock()
+_WEIBO_CACHE = {}           # uid -> {"at": ts, "data": {...}}
+WEIBO_LOGIN_PORT = 9333
+_WB_LOGIN_LOCK = threading.Lock()
+WEIBO_LOGIN = {"proc": None, "port": 0, "state": "idle", "error": "",
+               "started": 0, "nick": ""}
+
+
+# ---- cookie 存储：按域分开 ----------------------------------------------------
+#
+# 微博在 .weibo.com 与 .weibo.cn 各放一份同名 cookie（SUB / SUBP …）。
+# 如果把它们拼进同一行请求头，就变成 `SUB=A; SUB=B`，服务端只会取到第一个 ——
+# 表现在外就是「桌面站明明登录了，m 站接口却还说没登录」。所以要分开存：
+
+
+def _wb_store_read():
+    """读 cookie 存储：{"weibo.com": "SUB=…", "weibo.cn": "SUB=…", "*": 手动粘贴}。
+
+    "*" 是用户手动粘贴的一整串（没有域信息），两个域都用它兜底。
+    旧版本文件是一行纯 cookie 串，按手动粘贴处理。
+    """
+    try:
+        with open(WEIBO_FILE, encoding="utf-8") as f:
+            raw = f.read().strip()
+    except OSError:
+        return {}
+    if not raw:
+        return {}
+    if raw.startswith("{"):
+        try:
+            d = json.loads(raw)
+        except Exception:
+            return {}
+        if isinstance(d, dict):
+            return {k: v for k, v in d.items() if isinstance(v, str) and v}
+        return {}
+    return {"*": raw}
+
+
+def _wb_store_write(d):
+    """覆盖写 —— 本机删除会被劫持到回收站且可能失败，所以清除 = 写空对象。"""
+    os.makedirs(os.path.dirname(WEIBO_FILE), exist_ok=True)
+    with open(WEIBO_FILE, "w", encoding="utf-8") as f:
+        f.write(json.dumps({k: v for k, v in (d or {}).items() if v},
+                           ensure_ascii=False))
+    with _WEIBO_LOCK:
+        _WEIBO_CACHE.clear()
+
+
+def load_weibo_cookie(host=""):
+    """取给 host（"weibo.com" / "weibo.cn"）用的 cookie 串；不带 host 时取一份通用的。"""
+    d = _wb_store_read()
+    if not d:
+        return ""
+    if host:
+        for dom, ck in d.items():
+            if dom != "*" and (host == dom or host.endswith("." + dom)):
+                return ck
+    for k in ("weibo.com", "weibo.cn", "*"):
+        if d.get(k):
+            return d[k]
+    return ""
+
+
+def save_weibo_cookie(value, host="*"):
+    """写入一份 cookie。host="*" 表示手动粘贴（两个域共用）。"""
+    v = " ".join((value or "").split())
+    if v and (len(v) > 4096 or set(v) & set("\r\n")):
+        raise ValueError("Cookie 看起来不合法（应为一行 name=value; name=value…）")
+    d = _wb_store_read()
+    if d.get(host, "") == v:
+        return      # 没变就别写盘、别清缓存 —— 轮询每秒都会走到这里
+    if v:
+        d[host] = v
+    else:
+        d.pop(host, None)
+    _wb_store_write(d)
+
+
+def clear_weibo_cookie():
+    """清空全部（退出登录）。"""
+    _wb_store_write({})
+
+
+def save_weibo_cookie_soft():
+    """保留旧名字：等价于清空。"""
+    clear_weibo_cookie()
+
+
+def weibo_home(uid):
+    return "https://weibo.com/u/%s" % uid
+
+
+def weibo_login_url(uid):
+    """桌面版登录页（登录窗口的前台标签开的就是它）。
+
+    **不能**用 m.weibo.cn 的登录页：那是手机版 —— 只有手机号 + 验证码，还一路往
+    App 引，电脑上根本走不完（用户反馈的「弹出手机版登录界面，电脑无法登录」就是它）。
+    桌面版 passport 页有三种方式：扫描二维码 / 账号密码 / 微信。
+    url 参数 = 登录成功后回跳的地址。
+    """
+    back = weibo_home(uid) if uid else "https://weibo.com/"
+    return ("https://passport.weibo.com/sso/signin?entry=miniblog&source=miniblog&url="
+            + urllib.parse.quote(back, safe=""))
+
+
+def weibo_get(url, cookie="", referer=None, timeout=20, mobile=True):
+    h = {"User-Agent": WEIBO_UA if mobile else WEIBO_UA_DESKTOP,
+         "Accept": "application/json, text/plain, */*",
+         "Accept-Language": "zh-CN,zh;q=0.9", "X-Requested-With": "XMLHttpRequest"}
+    if mobile:
+        h["MWeibo-Pwa"] = "1"       # 不加这个，m 站会当成桌面浏览器而改回 HTML 页面
+    if referer:
+        h["Referer"] = referer
+    if cookie:
+        h["Cookie"] = cookie
+    req = urllib.request.Request(url, headers=h)
+    with urlopen(req, timeout) as r:
+        body = r.read().decode("utf-8", "replace")
+    try:
+        return json.loads(body)
+    except Exception:
+        raise RuntimeError("微博返回的不是 JSON（可能被风控拦了）")
+
+
+def weibo_text(html_text):
+    """把微博正文的 HTML 压成纯文本。
+
+    必须在这里压平：微博正文里带 a / img（表情）/ br，而它的内容是不可信的外部输入，
+    直接丢给前端等于把注入面交给它。压成纯文本之后前端照常转义输出即可。
+    表情是 <img alt="[哈哈]">，保留 alt 才能看出表情。
+    """
+    if not html_text:
+        return ""
+    t = re.sub(r"<img[^>]*\balt=\"([^\"]*)\"[^>]*>", r"\1", html_text)
+    t = re.sub(r"<br\s*/?>", "\n", t)
+    t = re.sub(r"</p>", "\n", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = html.unescape(t)
+    return t.strip()
+
+
+def weibo_parse_posts(cards, max_n=20):
+    """把 container 的 cards 压成前端要的最小字段集。"""
+    out = []
+    for c in cards or []:
+        mb = c.get("mblog")
+        if not mb:
+            continue
+        pics = []
+        for p in (mb.get("pics") or []):
+            u = p.get("url") or (p.get("large") or {}).get("url") or ""
+            if u:
+                pics.append(u)
+        rp = mb.get("retweeted_status") or None
+        out.append({
+            "id": str(mb.get("id") or ""),
+            "bid": str(mb.get("bid") or ""),
+            "text": weibo_text(mb.get("text")),
+            "at": str(mb.get("created_at") or ""),
+            "from": weibo_text((mb.get("source") or "")),
+            "pics": pics[:9],
+            "reposts": int(mb.get("reposts_count") or 0),
+            "comments": int(mb.get("comments_count") or 0),
+            "likes": int(mb.get("attitudes_count") or 0),
+            "long": bool(mb.get("isLongText")),
+            "retweet": ({
+                "name": (rp.get("user") or {}).get("screen_name") or "",
+                "text": weibo_text(rp.get("text"))[:400],
+                "pics": [p.get("url") for p in (rp.get("pics") or [])][:3],
+            } if rp else None),
+        })
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def weibo_profile_parse(uid, ui):
+    return {
+        "uid": str(uid),
+        "name": ui.get("screen_name") or "",
+        "avatar": ui.get("profile_image_url") or "",
+        "desc": ui.get("description") or "",
+        "followers": int(ui.get("followers_count") or 0),
+        "follows": int(ui.get("follow_count") or 0),
+        "posts": int(ui.get("statuses_count") or 0),
+        "verified": ui.get("verified_reason") or "",
+        "home": weibo_home(uid),
+    }
+
+
+def _wb_int(v):
+    """微博的数字字段有时是字符串（桌面接口就是 "3961"），统一转一下，坏了当 0。"""
+    try:
+        return int(str(v).strip() or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _wb_desktop_time(s):
+    """桌面接口的 created_at 是 "Sat Sep 27 20:11:05 +0800 2026" 这种英文串，
+    与 m 站的中文风格（"9-27" / "刚刚"）差太远，折成 "09-27 20:11" 再给前端。"""
+    try:
+        return time.strftime("%m-%d %H:%M",
+                             time.strptime(str(s).strip(), "%a %b %d %H:%M:%S %z %Y"))
+    except Exception:
+        return str(s or "")
+
+
+def _wb_desktop_pics(mb):
+    """桌面接口的图在 pic_infos 字典里（values → largest/large/bmiddle/thumbnail.url）。"""
+    urls = []
+    infos = mb.get("pic_infos")
+    if isinstance(infos, dict):
+        for v in infos.values():
+            if not isinstance(v, dict):
+                continue
+            for key in ("largest", "large", "bmiddle", "thumbnail"):
+                u = v.get(key)
+                if isinstance(u, dict) and u.get("url"):
+                    urls.append(u["url"])
+                    break
+    for p in (mb.get("pics") or []):        # 有的卡片走这套老字段
+        if isinstance(p, dict) and p.get("url"):
+            urls.append(p["url"])
+    out = []
+    for u in urls:
+        if u not in out:
+            out.append(u)
+    return out[:9]
+
+
+def weibo_parse_posts_desktop(items, max_n=20):
+    """桌面接口（/ajax/statuses/mymblog）的 list → 与 m 站完全相同的前端字段集。
+
+    两端字段名不一样（mblogid / text_raw / pic_infos），必须在服务端抹平，
+    否则前端要为「数据是从哪条通道来的」写两套渲染。
+    """
+    out = []
+    for mb in items or []:
+        if not isinstance(mb, dict):
+            continue
+        rp = mb.get("retweeted_status") or None
+        txt = mb.get("text_raw")
+        out.append({
+            "id": str(mb.get("id") or ""),
+            "bid": str(mb.get("mblogid") or mb.get("bid") or ""),
+            "text": (txt if txt else weibo_text(mb.get("text") or "")).strip(),
+            "at": _wb_desktop_time(mb.get("created_at")),
+            "from": weibo_text(mb.get("source") or ""),
+            "pics": _wb_desktop_pics(mb),
+            "reposts": _wb_int(mb.get("reposts_count")),
+            "comments": _wb_int(mb.get("comments_count")),
+            "likes": _wb_int(mb.get("attitudes_count")),
+            "long": bool(mb.get("isLongText")),
+            "retweet": ({
+                "name": (rp.get("user") or {}).get("screen_name") or "",
+                "text": ((rp.get("text_raw") or weibo_text(rp.get("text") or ""))[:400]),
+                "pics": _wb_desktop_pics(rp)[:3],
+            } if rp else None),
+        })
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def weibo_desktop_profile(uid, u):
+    return {
+        "uid": str(uid),
+        "name": u.get("screen_name") or "",
+        "avatar": u.get("profile_image_url") or "",
+        "desc": u.get("description") or "",
+        "followers": _wb_int(u.get("followers_count")),
+        "follows": _wb_int(u.get("friends_count") or u.get("follow_count")),
+        "posts": _wb_int(u.get("statuses_count")),
+        "verified": u.get("verified_reason") or "",
+        "home": weibo_home(uid),
+    }
+
+
+def weibo_mobile(uid, cookie):
+    """m 站通道：访客也能拿到资料卡；登录态下正文一起给。"""
+    prof, posts, err = None, [], ""
+    try:
+        d = weibo_get("%s?type=uid&value=%s&containerid=100505%s" % (WEIBO_API, uid, uid),
+                      cookie=cookie, referer=weibo_home(uid))
+        ui = (d.get("data") or {}).get("userInfo") or {}
+        if ui:
+            prof = weibo_profile_parse(uid, ui)
+    except Exception as e:
+        err = "资料获取失败：%s" % e
+    try:
+        d2 = weibo_get("%s?type=uid&value=%s&containerid=107603%s" % (WEIBO_API, uid, uid),
+                       cookie=cookie, referer=weibo_home(uid))
+        posts = weibo_parse_posts((d2.get("data") or {}).get("cards") or [])
+    except Exception as e:
+        err = (err + " / " if err else "") + "正文获取失败：%s" % e
+    return prof, posts, err
+
+
+def weibo_desktop(uid, cookie):
+    """桌面站通道（weibo.com/ajax）：必须登录，但登录后数据最全、最不容易被风控。"""
+    prof, posts, err = None, [], ""
+    ref = "https://weibo.com/u/%s" % uid
+    try:
+        d = weibo_get("%s/profile/info?uid=%s" % (WEIBO_DESKTOP_API, uid),
+                      cookie=cookie, referer=ref, mobile=False)
+        if _wb_int(d.get("ok")) != 1:
+            raise RuntimeError(d.get("msg") or "接口拒绝（多为未登录）")
+        u = (d.get("data") or {}).get("user") or {}
+        if u:
+            prof = weibo_desktop_profile(uid, u)
+    except Exception as e:
+        err = "桌面资料失败：%s" % e
+    try:
+        d2 = weibo_get("%s/statuses/mymblog?uid=%s&page=1&feature=0" % (WEIBO_DESKTOP_API, uid),
+                       cookie=cookie, referer=ref, mobile=False)
+        if _wb_int(d2.get("ok")) != 1:
+            raise RuntimeError(d2.get("msg") or "接口拒绝（多为未登录）")
+        posts = weibo_parse_posts_desktop((d2.get("data") or {}).get("list") or [])
+    except Exception as e:
+        err = (err + " / " if err else "") + "桌面正文失败：%s" % e
+    return prof, posts, err
+
+
+def weibo_fetch(uid, force=False):
+    """取一位的「资料 + 正文」。同一位的结果缓存一会儿：接口慢且容易触发风控。
+
+    两条通道，各自的价值不同：
+      ① m 站 —— **游客也有资料卡**，所以没登录时它至少能把资料填上；
+      ② 桌面站 —— 必须登录，但登录后正文最稳、字段最全。
+    先 ①，缺正文时用 ② 补，两个都没有才算真失败。这样「未登录 → 只看资料」
+    与「登录 → 看正文」是同一段代码，不用分叉。
+    """
+    uid = str(uid or "").strip()
+    if not uid.isdigit():
+        return {"error": "没有配置微博 UID"}
+    now = time.time()
+    with _WEIBO_LOCK:
+        hit = _WEIBO_CACHE.get(uid) or {}
+    if not force and hit and now - hit.get("at", 0) < (
+            WEIBO_TTL_OK if (hit.get("data") or {}).get("posts") else WEIBO_TTL_FAIL):
+        return hit["data"]
+
+    ck_cn = load_weibo_cookie("weibo.cn")
+    ck_com = load_weibo_cookie("weibo.com")
+    out = {"uid": uid, "logged": bool(ck_cn or ck_com), "profile": None,
+           "posts": [], "need_login": False, "error": "", "via": ""}
+
+    prof, posts, err = weibo_mobile(uid, ck_cn)
+    if prof:
+        out["profile"] = prof
+    if posts:
+        out["posts"] = posts
+        out["via"] = "mobile"
+    if err:
+        out["error"] = err
+
+    if not out["posts"] and ck_com:
+        prof2, posts2, err2 = weibo_desktop(uid, ck_com)
+        if prof2 and not out["profile"]:
+            out["profile"] = prof2
+        if posts2:
+            out["posts"] = posts2
+            out["via"] = "desktop"
+        if err2:
+            out["error"] = (out["error"] + " / " if out["error"] else "") + err2
+
+    if not out["posts"]:
+        out["need_login"] = True
+
+    with _WEIBO_LOCK:
+        _WEIBO_CACHE[uid] = {"at": now, "data": out}
+    return out
+
+
+def api_weibo(query):
+    """GET /api/weibo —— 当前板块的微博（资料 + 正文）。"""
+    st = cur_station()
+    uid = str(st.get("weibo") or "").strip()
+    if not uid:
+        return 200, {"ok": False, "station": station_head(st),
+                     "error": "这位还没配微博（在 data/stations.json 里加 weibo 字段）"}
+    data = weibo_fetch(uid, force=("refresh" in query))
+    out = dict(data)
+    out["ok"] = bool(data.get("profile") or data.get("posts"))
+    out["station"] = station_head(st)
+    return 200, out
+
+
+def api_weibo_cookie(obj):
+    """POST /api/weibo/cookie —— 手动粘贴 cookie（扫码登录之外的一条稳的路）。"""
+    v = str(obj.get("cookie") or "").strip()
+    if v and "=" not in v:
+        return 400, {"error": "这不像 Cookie：应当形如 SUB=…; SUBP=…"}
+    try:
+        if v:
+            save_weibo_cookie(v)
+        else:
+            save_weibo_cookie_soft()
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    # 存完立刻试一次：只有真的能拿到正文才算「登录成功」
+    uid = str(cur_station().get("weibo") or "")
+    chk = weibo_fetch(uid, force=True) if uid else {}
+    works = bool(chk.get("posts"))
+    profile = bool(chk.get("profile"))
+    if works:
+        msg = ""
+    elif profile:
+        msg = "已保存：能看到资料卡，但正文仍取不到 —— 这一份 Cookie 是未登录（访客）状态"
+    else:
+        msg = "已保存，但连资料都取不到：Cookie 可能已失效或过期"
+    return 200, {"ok": True, "logged": works,
+                 "works": works, "profile": profile,
+                 "posts": len(chk.get("posts") or []),
+                 "error": msg}
+
+
+def api_weibo_logout():
+    save_weibo_cookie_soft()
+    return 200, {"ok": True, "logged": False}
+
+
+# ---------------- 应用内登录：启动一个浏览器登录，再用 CDP 把 cookie 取回来 ----------------
+#
+# 为什么要这样：微博的正文必须登录才给。让用户在本程序里重新实现一遍微博登录
+# （扫码 / 密码 / 验证码）既不现实也容易随对方改版失效；不如开一个**独立 profile**
+# 的浏览器窗口让用户在熟悉的环境里完成登录，登录态由本服务通过调试协议读回来。
+# 读 cookie 用的 WS 客户端是项目里本来就有的那套（弹幕连 B 站用的，纯标准库）。
+
+BROWSER_CANDIDATES = (
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+)
+
+
+def find_browser():
+    for p in BROWSER_CANDIDATES:
+        if os.path.isfile(p):
+            return p
+    for name in ("chrome.exe", "msedge.exe"):
+        w = shutil.which(name)
+        if w:
+            return w
+    return ""
+
+
+def _cdp_ws_open(host, port, path):
+    """CDP 用的是明文 ws://（本地调试端口）。
+
+    注意不能复用 _ws_handshake —— 那个函数默认套 TLS（给 wss 用的），
+    对本地调试口会直接握手失败。
+    """
+    sock = socket.create_connection((host, port), timeout=15)
+    key = base64.b64encode(os.urandom(16)).decode()
+    req = ("GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\n"
+           "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\n"
+           "Sec-WebSocket-Version: 13\r\n\r\n" % (path, host, port, key))
+    sock.sendall(req.encode())
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise RuntimeError("CDP 握手期间连接被关闭")
+        buf += chunk
+    first = buf.split(b"\r\n", 1)[0].decode("latin-1")
+    if "101" not in first:
+        raise RuntimeError("CDP 握手失败：%s" % first)
+    return sock
+
+
+def cdp_targets(port):
+    """列出调试端口下的所有 target（页面 / iframe …）。"""
+    with urlopen("http://127.0.0.1:%d/json/list" % port, 6) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def cdp_call(ws_url, method, params=None, timeout=6):
+    """在某个 target 上发一条 CDP 命令，返回 result（失败返回 None）。"""
+    m = re.match(r"ws://([^:/]+):(\d+)(/.*)$", ws_url or "")
+    if not m:
+        return None
+    try:
+        sock = _cdp_ws_open(m.group(1), int(m.group(2)), m.group(3))
+    except Exception:
+        return None
+    try:
+        _ws_send(sock, json.dumps({"id": 1, "method": method,
+                                   "params": params or {}}).encode(), 1)
+        for _ in range(40):
+            op, data = _ws_recv(sock, timeout)
+            if op is None:
+                return None
+            if op == 9:                     # ping → pong
+                _ws_send(sock, data, 10)
+                continue
+            if op != 1:
+                continue
+            try:
+                msg = json.loads(data.decode("utf-8", "replace"))
+            except Exception:
+                continue
+            if msg.get("id") == 1:
+                return msg.get("result") or {}
+        return None
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def cdp_cookies(port):
+    """连上调试端口，取浏览器当前的全部 cookie。"""
+    for t in cdp_targets(port):
+        if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+            res = cdp_call(t["webSocketDebuggerUrl"], "Network.getAllCookies")
+            if res is not None:
+                return res.get("cookies") or []
+    raise RuntimeError("没能从浏览器取到 cookie")
+
+
+def cdp_navigate(port, url):
+    """把登录窗口里的某个标签导航到 url。
+
+    优先挑「不是 m 站」的那个标签：用户点「登录微博」时，窗口里应该落在桌面站上。
+    窗口是复用的 —— 上一次可能停在 m 站（手机版登录页在电脑上根本走不通），
+    不重新导航的话，用户点了按钮看到的还是上次那个手机版界面。
+    """
+    pages = [t for t in cdp_targets(port) if t.get("type") == "page"]
+    if not pages:
+        return False
+    pick = next((t for t in pages if "m.weibo.cn" not in (t.get("url") or "")), pages[0])
+    return cdp_call(pick.get("webSocketDebuggerUrl"),
+                    "Page.navigate", {"url": url}) is not None
+
+
+def _cookie_domain_match(dom, host):
+    dom = (dom or "").lstrip(".")
+    return bool(dom) and (host == dom or host.endswith("." + dom))
+
+
+def weibo_cookie_header(cookies, host="weibo.com"):
+    """把 CDP 的 cookie 列表拼成某个域要用的请求头。
+
+    必须按域筛：浏览器对 weibo.com 和 m.weibo.cn 各有一份 SUB，全塞进一行会变成
+    `SUB=A; SUB=B`，微博只会取第一个 —— 于是「桌面站登录了、m 站说没登录」。
+    """
+    out, seen = [], set()
+    for c in cookies:
+        name = c.get("name") or ""
+        if not name or not _cookie_domain_match(c.get("domain"), host):
+            continue
+        if name in seen:               # 同一域里更深的那份优先（浏览器也这么做）
+            out = [x for x in out if not x.startswith(name + "=")]
+        seen.add(name)
+        out.append("%s=%s" % (name, c.get("value")))
+    return "; ".join(out)
+
+
+def weibo_login_probe(cookies):
+    """把浏览器里的 cookie 取回来试一次，看走到哪一步。
+
+    返回 (state, nick, via)：
+      "visitor" —— 拿到访客 cookie：资料卡能看，正文还不行（微博要求登录）
+      "logged"  —— 正文也能取到：完整可用（via 说明是哪条通道给的）
+      ""        —— cookie 还没成形（页面还没跑完访客流程）
+    判据是**真的拿一次数据**，而不是看 cookie 里有没有某个名字 ——
+    "SUB" 这个名字连访客态都有，只有能不能取到数据才是唯一标准。
+    """
+    jars = {}
+    for host in ("weibo.com", "weibo.cn"):
+        ck = weibo_cookie_header(cookies, host)
+        if ck:
+            jars[host] = ck
+    if not jars:
+        return "", "", ""
+    for host, ck in jars.items():
+        try:
+            save_weibo_cookie(ck, host)
+        except ValueError:
+            return "", "", ""
+    uid = str(cur_station().get("weibo") or "")
+    if not uid:
+        return "", "", ""
+    chk = weibo_fetch(uid, force=True)
+    nick = ((chk.get("profile") or {}).get("name")) or ""
+    if chk.get("posts"):
+        return "logged", nick, chk.get("via") or ""
+    if chk.get("profile"):
+        return "visitor", nick, ""
+    return "", "", ""
+
+
+def api_weibo_login_start():
+    """POST /api/weibo/login —— 开一个浏览器窗口让用户登录微博。"""
+    exe = find_browser()
+    if not exe:
+        return 400, {"error": "本机没找到 Chrome / Edge，无法开登录窗口。"
+                              "可以在设置页手动粘贴 Cookie。"}
+    # 前台标签直接开**桌面版登录页**（扫码 / 账号 / 微信三种方式都能用）；
+    # 第二个标签开 m 站，是为了让访客 cookie 落到 .weibo.cn 上 ——
+    # 不登录的时候，「微博」视图还能照样显示资料卡。
+    uid = str(cur_station().get("weibo") or "")
+    desk = weibo_login_url(uid)
+    mob = ("https://m.weibo.cn/u/%s" % uid) if uid else "https://m.weibo.cn/"
+    with _WB_LOGIN_LOCK:
+        p = WEIBO_LOGIN.get("proc")
+        if p is not None and p.poll() is None:
+            # 复用已有窗口，但先把它导航回桌面站：上次可能停在 m 站，
+            # 而用户再点「登录」就是想登录 —— 停在手机版页面等于白点。
+            port0 = WEIBO_LOGIN.get("port") or WEIBO_LOGIN_PORT
+            try:
+                cdp_navigate(port0, desk)
+            except Exception:
+                pass
+            return 200, {"ok": True, "state": WEIBO_LOGIN["state"], "reused": True}
+        prof = os.path.join(APPDIR, "weibo-profile")
+        os.makedirs(prof, exist_ok=True)
+        args = [exe, "--remote-allow-origins=*",
+                "--remote-debugging-port=%d" % WEIBO_LOGIN_PORT,
+                "--user-data-dir=" + prof, "--no-first-run",
+                "--no-default-browser-check", "--new-window", desk, mob]
+        try:
+            # 不要加 CREATE_NO_WINDOW：用户得在那个窗口里完成登录
+            proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            return 500, {"error": "启动浏览器失败：%s" % e}
+        WEIBO_LOGIN.update({"proc": proc, "port": WEIBO_LOGIN_PORT, "state": "opened",
+                            "error": "", "started": time.time(), "nick": ""})
+    return 200, {"ok": True, "state": "opened",
+                 "hint": "已打开微博电脑版登录页（扫码 / 账号 / 微信都可以）；"
+                         "登录完成后这一页会自动解锁正文。"}
+
+
+def api_weibo_login_poll():
+    """GET /api/weibo/login/poll —— 轮询登录结果（前端每秒问一次）。"""
+    if load_weibo_cookie():
+        uid = str(cur_station().get("weibo") or "")
+        d = weibo_fetch(uid) if uid else {}
+        nick = ((d.get("profile") or {}).get("name")) or ""
+        if d.get("posts"):
+            return 200, {"state": "done", "logged": True, "nick": nick}
+        if d.get("profile"):
+            # 访客态：资料能看、正文不行。窗口还开着，用户还能在里头登录。
+            return 200, {"state": "visitor", "logged": False, "nick": nick}
+    with _WB_LOGIN_LOCK:
+        st = WEIBO_LOGIN
+        if not st.get("port") or st.get("state") == "idle":
+            return 200, {"state": "idle", "logged": False}
+        if time.time() - (st.get("started") or 0) > 900:
+            st["state"] = "timeout"
+            return 200, {"state": "timeout", "logged": False,
+                         "error": "登录窗口开太久（超过 15 分钟），已放弃等待"}
+        port = st["port"]
+    try:
+        cookies = cdp_cookies(port)
+    except Exception as e:
+        return 200, {"state": "waiting", "logged": False, "reason": str(e)[:80]}
+    state, nick, via = weibo_login_probe(cookies)
+    if state == "visitor":
+        # 访客 cookie 先存下 —— 页面立刻就能显示资料卡，不用等用户登录
+        with _WB_LOGIN_LOCK:
+            WEIBO_LOGIN.update({"state": "visitor", "nick": nick})
+        return 200, {"state": "visitor", "logged": False, "nick": nick}
+    if state != "logged":
+        return 200, {"state": "waiting", "logged": False, "reason": "还没检测到登录"}
+    with _WB_LOGIN_LOCK:
+        WEIBO_LOGIN.update({"state": "done", "nick": nick})
+        proc = WEIBO_LOGIN.get("proc")
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()            # 登录态已经拿到，这个专用窗口就没用了
+        except Exception:
+            pass
+    return 200, {"state": "done", "logged": True, "nick": nick}
+
+
 def main():
     # 通过 komichi:// 协议被拉起时，Windows 会把那个 URL 当参数递进来（如 komichi://open/），
     # argparse 不认它就会直接报错退出 —— 先摘掉。
@@ -2099,6 +3679,8 @@ def main():
     # 页面全关掉就退出（页面会 sendBeacon 说一声；心跳兜底浏览器崩溃的情况）
     SERVER_REF[0] = srv
     start_page_watchdog()
+    # 回放清单自动发现：只填了 name + UID 的主播靠这一步补齐（后台跑，不挡启动）
+    series_kick()
     print("  退出时机：网页全部关闭后自动退出（另有 %d 分钟无心跳兜底）"
           % int(PAGE_IDLE // 60))
 

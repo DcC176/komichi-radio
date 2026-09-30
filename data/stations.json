@@ -1,0 +1,74 @@
+{
+  "_note": [
+    "_version 配置版本，别删：升级时靠它区分「用户改过的」与「上一版的默认值」。",
+    "主播注册表 —— 这就是「用户自定义选择看谁」的接口。",
+    "想加人 / 改内容来源，直接编辑本文件，改完刷新页面即可（不需要改代码）。",
+    "字段说明：",
+    "  id        内部标识，同时是数据目录名（data/stations/<id>/），定了就别改",
+    "  name      显示名（完整）",
+    "  short     短名，用在窄栏/网格格子上",
+    "  mid       B 站 UID（空间号）：space.bilibili.com/<mid>",
+    "  room      B 站直播间真实房间号（不是短号）",
+    "  series_id 可选。留空（推荐）= 自动从「主页 → 合集和系列 → 系列·直播回放」获取；",
+    "            只有想强制指定别的系列时才填（填了就不走自动发现）。",
+    "            想手填：空间页打开该系列，URL 形如",
+    "            space.bilibili.com/<mid>/lists/<series_id>?type=series，那串数字就是。",
+    "  tag       归属标签，用于分组显示",
+    "  site      个人网站（没有就留空）",
+    "  accent    主题色，用在切换器与网格格子上做区分",
+    "  main      true = 主站（默认频道、默认直播间都用它），有且只能有一个",
+    "  weibo     微博 UID：weibo.com/u/<weibo>。微博板块按它取资料与正文；留空则不显示微博。"
+  ],
+  "stations": [
+    {
+      "id": "komichi",
+      "name": "四时小路Komichi",
+      "short": "四时小路",
+      "mid": "1512246445",
+      "room": "1700301235",
+      "series_id": "",
+      "tag": "VR287",
+      "site": "",
+      "accent": "#ff3b4e",
+      "main": true,
+      "weibo": "8352921455"
+    },
+    {
+      "id": "chu2u",
+      "name": "羽啾chu2u",
+      "short": "羽啾",
+      "mid": "2138961136",
+      "room": "1727074031",
+      "series_id": "",
+      "tag": "VR287",
+      "site": "https://chu2u.com/",
+      "accent": "#d4da7b",
+      "weibo": "8295994616"
+    },
+    {
+      "id": "viridis",
+      "name": "小松绿Viridis",
+      "short": "小松绿",
+      "mid": "1891335475",
+      "room": "1727071052",
+      "series_id": "",
+      "tag": "VR287",
+      "site": "https://viridis.love/",
+      "accent": "#8fc98a",
+      "weibo": "9197842511"
+    },
+    {
+      "id": "sumire",
+      "name": "枝堇Sumire",
+      "short": "枝堇",
+      "mid": "1150976664",
+      "room": "1727076670",
+      "series_id": "",
+      "tag": "VR287",
+      "site": "https://sumire.live/",
+      "accent": "#b4a6bf",
+      "weibo": "9187735727"
+    }
+  ],
+  "_version": 2
+}
