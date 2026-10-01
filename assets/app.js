@@ -132,6 +132,35 @@
     return out;
   }
 
+  /* 点亮多个板块时，把它们的主题色混成一个（红 + 黄 → 橙）。
+     逐级线性插值：第 i 个色按 1/(i+1) 的权重并进去，等价于等权平均；
+     和 mixHex 一样走 srgb 线性插值，颜色是可预期的，不会出现意外跳色。 */
+  function mixAccents(ids) {
+    var hexes = [];
+    (ids || []).forEach(function (id) {
+      var s = findStation(id);
+      var h = s ? themeHex(s.accent) : '';
+      if (h) hexes.push(h);
+    });
+    if (!hexes.length) return '';
+    var acc = hexes[0];
+    for (var i = 1; i < hexes.length; i++) {
+      acc = mixHex(acc, hexes[i], 1 / (i + 1)) || acc;   // mixHex 的 t 是「新色的占比」
+    }
+    return acc;
+  }
+
+  /* 底色/卡片底色是否跟着主题走。
+     单板块沿用老规矩：主站不上色（它那套黑红配色是特意保留的），副站按自己的色调。
+     但**点亮两个及以上**时一律上色 —— 不然「混出来的颜色」在画面上根本看不见。 */
+  function stationTint(ids) {
+    var list = ids || [];
+    if (!list.length) return false;
+    if (list.length > 1) return true;
+    var s = findStation(list[0]);
+    return !(s && s.main);
+  }
+
   function themeSweep(hex, x, y) {
     if (!hex) return;
     var vw = window.innerWidth, vh = window.innerHeight;
@@ -3795,8 +3824,8 @@
         var curId = ST || ((mains[0] || {}).id || '');
         var cur = findStation(curId);
         if (cur) {
-          ST_TINT = !cur.main;      // 主站不上色（保持黑红），副站按自己色调
-          applyTheme(cur.accent);
+          ST_TINT = stationTint(ST_SET);
+          applyTheme(mixAccents(ST_SET) || cur.accent);   // 多板块点亮时用混出来的色
           applyStationBrand(cur);
         }
         renderMixedNote();          // 提示条要等名单回来才知道短名
@@ -3862,9 +3891,11 @@
     // 视觉反馈不等重载：主题色/扫过动画立刻按新的主位走
     var nxt = findStation(ST);
     if (nxt && nxt.accent) {
-      ST_TINT = !nxt.main;
-      applyTheme(nxt.accent);
-      try { sessionStorage.setItem('xl_sweep', nxt.accent); } catch (e) { /* 忽略 */ }
+      // 点亮的板块不止一个时，主题色取它们混出来的那一个（扫过动画同色）
+      var mixed = mixAccents(ST_SET) || nxt.accent;
+      ST_TINT = stationTint(ST_SET);
+      applyTheme(mixed);
+      try { sessionStorage.setItem('xl_sweep', mixed); } catch (e) { /* 忽略 */ }
     }
     /* 重载那一小段会露出「骨架态」（框架在、内容是空的），和切换前的画面一比
        就是一次突变 —— 用户说的「明显卡顿」主要就是它。
@@ -3882,12 +3913,17 @@
         }));
       } catch (e) { /* 忽略 */ }
       document.documentElement.classList.add('switching');
-    }, 150);
+    }, 90);        // 跟着缩短的合并延迟一起提前，保证重载那一下遮罩已经盖得差不多
     /* 延迟重载：把连着点几下的操作合并成一次重载（点亮 4 位只刷一次页面）。
        数据源变了必须重建时间轴，整页重载是最省事也最不容易错的做法
-       —— 清单与分段都带缓存，重载后列表基本是立刻出来的。 */
+       —— 清单与分段都带缓存，重载后列表基本是立刻出来的。
+
+       实测这段延迟是整个切换耗时的绝对大头：点灯→重载开始 342ms，
+       而重载本身（重载开始→首行渲染）只要 **22ms**。
+       340ms 是照着「连点也要能合并」定的，但人的连点间隔多在 150~250ms，
+       220ms 一样合得住，单点却少了 120ms。 */
     if (lampTimer) clearTimeout(lampTimer);
-    lampTimer = setTimeout(function () { location.reload(); }, 340);
+    lampTimer = setTimeout(function () { location.reload(); }, 220);
   }
 
   function mountStationPicker() {
