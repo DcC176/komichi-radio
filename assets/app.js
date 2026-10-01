@@ -559,6 +559,10 @@
     dashPlayer.updateSettings({
       debug: { logLevel: dashjs.Debug.LOG_LEVEL_NONE },
       streaming: { buffer: { fastSwitchEnabled: false } }
+      // 试过把 abr.initialBitrate 设成最低档来「快速起播」：档位确实降下来了
+      // （视频尺寸先 640x360 再升到 1920x1080），但 playing 反而从 389ms 拖到 722ms ——
+      // dash.js 起播后立刻升档，把出画时间推后了。实测有害，故不设。
+      // 服务端 mpd 里仍然写整条阶梯：它的价值在**网络变差时 ABR 能降档**，而不是起播。
     });
     dashPlayer.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, function () {
       if (state.loadingKey !== key) return;
@@ -1404,6 +1408,25 @@
     if (keysBound) return;
     keysBound = true;
 
+    // 主播管理：填 UID → 检测 → 选来源 → 保存 / 删除
+    var stProbeBtn = document.getElementById('st-probe');
+    if (stProbeBtn) stProbeBtn.addEventListener('click', probeStation);
+    var stMid = document.getElementById('st-mid');
+    if (stMid) {
+      stMid.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') probeStation();      // 输入框里回车即检测
+      });
+    }
+    var stSaveBtn = document.getElementById('st-save');
+    if (stSaveBtn) stSaveBtn.addEventListener('click', saveStation);
+    var stList = document.getElementById('st-list');
+    if (stList) {
+      stList.addEventListener('click', function (e) {
+        var b = e.target && e.target.closest ? e.target.closest('[data-st-del]') : null;
+        if (b) deleteStation(b.getAttribute('data-st-del'));
+      });
+    }
+
     // 自动分段：开关 + 手动给最新一期排队，状态轮询在 renderSettings 里起
     el.segAuto.addEventListener('change', function () {
       postJSON('/api/segments/auto', { on: el.segAuto.checked }).then(segPoll);
@@ -1575,8 +1598,135 @@
     }).catch(function () { tip.textContent = '读不到回放来源状态（服务未启动？）'; });
   }
 
+  /* ---------------------------------------------------------- 主播管理（设置页）
+     换主播原本只能手改 data/stations.json。这里把「探测 → 选来源 → 保存 / 删除」
+     搬进页面：名字与房间号由探测填好，来源默认自动发现（留空），
+     只有用户**显式**选了某个系列才写死 —— 写死后新系列不会再自动跟上。 */
+  var stProbe = null;                 // 最近一次探测结果，保存时用来补字段
+
+  function stTip(html) {
+    var t = document.getElementById('st-state');
+    if (t) t.innerHTML = html || '';
+  }
+
+  function renderStationsCard() {
+    var box = document.getElementById('st-list');
+    if (!box) return;
+    var list = STATIONS || [];
+    if (!list.length) {
+      box.innerHTML = '<p class="live-note">还没读到主播列表。</p>';
+      return;
+    }
+    box.innerHTML = list.map(function (s) {
+      var meta = [];
+      if (s.mid) meta.push('UID ' + s.mid);
+      if (s.room) meta.push('房间 ' + s.room);
+      meta.push(s.series_id ? ('系列 ' + s.series_id + '（手填）') : '来源自动发现');
+      return '<div class="key-row">'
+        + '<span class="key-name" style="border-left:3px solid '
+        + esc(s.accent || '#8a8a95') + ';padding-left:8px">'
+        + esc(s.short || s.name || s.id) + (s.main ? ' <b>（主站）</b>' : '') + '</span>'
+        + '<span class="key-scope">' + esc(meta.join(' · ')) + '</span>'
+        + (s.main ? '' : '<button class="key-del" type="button" title="删除"'
+           + ' style="margin-left:auto" data-st-del="' + esc(s.id) + '">×</button>')
+        + '</div>';
+    }).join('');
+  }
+
+  function stRefreshUI() {
+    // fetchStations 有 30 秒缓存；服务端改完文件已经主动失效过，这里拿到的是新的
+    fetchStations().then(function () {
+      renderLamps();
+      renderMixedNote();
+      renderStationsCard();
+    });
+  }
+
+  function probeStation() {
+    var input = document.getElementById('st-mid');
+    var sel = document.getElementById('st-source');
+    var box = document.getElementById('st-source-box');
+    var note = document.getElementById('st-source-note');
+    var save = document.getElementById('st-save');
+    var mid = (input.value || '').trim();
+    if (!mid) { stTip('先填主播 UID'); return; }
+    stTip('正在检测…');
+    stProbe = null;
+    if (box) box.hidden = true;
+    if (note) note.hidden = true;
+    if (save) save.hidden = true;
+    postJSON('/api/stations/probe', { mid: mid })
+      .then(function (d) {
+        if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
+        stProbe = d.probe || null;
+        var srcs = (stProbe && stProbe.sources) || [];
+        sel.innerHTML = '<option value="">自动（推荐：以后新系列会自己跟上）</option>'
+          + srcs.map(function (s) {
+              return '<option value="' + esc(s.id) + '">'
+                + esc((s.name || s.id) + '（' + s.total + ' 个）') + '</option>';
+            }).join('');
+        if (stProbe && stProbe.suggested) sel.value = stProbe.suggested;
+        box.hidden = false;
+        save.hidden = false;
+        if (note) {
+          note.hidden = !srcs.length;
+          if (!srcs.length) {
+            note.innerHTML = '这位的「合集和系列」里还没有可用的<b>系列</b>，'
+              + '加进来也能用，但回放清单会是空的（只有合集不行，归档接口只认系列）。';
+          }
+        }
+        stTip('查到 <b>' + esc((stProbe && stProbe.name) || ('UID ' + mid))
+          + '</b>' + ((stProbe && stProbe.room) ? '，房间号 ' + esc(stProbe.room) : '')
+          + '，确认无误就点保存。');
+      })
+      .catch(function () { stTip('检测失败，请重试'); });
+  }
+
+  function saveStation() {
+    var sel = document.getElementById('st-source');
+    var mid = (document.getElementById('st-mid').value || '').trim();
+    if (!mid) { stTip('先填主播 UID'); return; }
+    var body = { mid: mid };
+    if (stProbe) {
+      if (stProbe.name) body.name = stProbe.name;
+      if (stProbe.room) body.room = stProbe.room;
+    }
+    var sid = (sel.value || '').trim();
+    if (sid) body.series_id = sid;      // 留空 = 自动发现（v2 语义）
+    stTip('正在保存…');
+    postJSON('/api/stations/save', body)
+      .then(function (d) {
+        if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
+        stTip(sid ? '已保存 ✓（来源已写死为这个系列，以后不再自动发现）' : '已保存 ✓');
+        stRefreshUI();
+      })
+      .catch(function () { stTip('保存失败，请重试'); });
+  }
+
+  function deleteStation(id) {
+    var tip = document.getElementById('st-state');
+    if (!window.confirm('删除这位主播？\n\n只是从列表里移除；已经抓下来的回放清单仍留在本机。')) return;
+    postJSON('/api/stations/delete', { id: id })
+      .then(function (d) {
+        if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
+        // 「在看谁」里可能还留着它的 id：不清掉的话下次加载会去找一个不存在的板块
+        ST_SET = ST_SET.filter(function (x) { return x !== id; });
+        if (ST === id) ST = ST_SET.length ? ST_SET[0] : '';
+        saveStations();
+        if (ST === id || !ST) {
+          // 删掉的正是在看的这一位：整页重载，和「点灯切换」走同一条路
+          location.reload();
+          return;
+        }
+        stTip('已删除 ✓');
+        stRefreshUI();
+      })
+      .catch(function () { stTip('删除失败，请重试'); });
+  }
+
   function renderSettings() {
     bindSettings();
+    renderStationsCard();
     el.keysList.innerHTML = KEY_ACTIONS.map(function (a) {
       var c = keyMap[a.id];
       return '<div class="key-row">'
@@ -1849,10 +1999,79 @@
 
   /* ---------------------------------------------------------- 视图路由 */
 
+  var viewEntered = false;      // 路由时是否已播过入场动画
+  var viewSwitchTimer = null;   // 切页时给 .wrap 临时开过渡，用完摘掉
+  var veilTimer = null;         // 切换板块时延后盖过渡遮罩（先让用户看见灯的反馈）
+
+  /* 切换板块的过渡收尾：新板块的内容已经渲染出来了，把遮罩撤掉。
+     留一个最短停留 —— 数据来得太快时遮罩一闪而过，比不盖还刺眼。
+     另有一道硬超时兜在 index.html 的内联脚本里（万一没走到这里，
+     也不能把整个页面永久藏着）。 */
+  function finishSwitchVeil() {
+    var root = document.documentElement;
+    if (!root.classList.contains('switching')) return;
+    var at = 0;
+    try {
+      at = (JSON.parse(sessionStorage.getItem('xl_veil') || '{}') || {}).at || 0;
+    } catch (e) { /* 忽略 */ }
+    setTimeout(function () {
+      root.classList.remove('switching');
+      try { sessionStorage.removeItem('xl_veil'); } catch (e) { /* 忽略 */ }
+    }, Math.max(0, 260 - (Date.now() - at)));
+  }
+
+  /* 让当前视图播一次入场动画（淡入 + 轻微上移，220ms）。
+     dir: 1 = 从右边进（往右点的标签），-1 = 从左边进，0 = 只淡入（首屏）。
+     remove 之后再读一次 offsetWidth 是必需的 —— 同一帧内 remove+add 会被浏览器
+     合并，动画不会重播（连点同一标签、或在两个视图间来回切都要能重播）。 */
+  function enterView(dir) {
+    var s = document.querySelector('.views > .view.active');
+    if (!s) return;
+    s.style.setProperty('--enter-x', (dir > 0 ? 16 : dir < 0 ? -16 : 0) + 'px');
+    s.classList.remove('view-enter');
+    void s.offsetWidth;
+    s.classList.add('view-enter');
+  }
+
+  /* 顶栏那颗红色胶囊：它不属于任何标签，只是在标签之间滑过去。
+     instant = 直接就位（首次 / 改窗口大小），不给过渡 ——
+     否则页面一打开胶囊会从最左边「滑」到第一项。 */
+  var tabPillTimer = null;
+
+  function moveTabPill(instant) {
+    var nav = document.querySelector('.tb-tabs');
+    var pill = document.getElementById('tb-pill');
+    var tab = nav && nav.querySelector('.tab.active');
+    if (!nav || !pill || !tab) return;
+    if (instant) pill.classList.remove('ready');
+    pill.style.width = tab.offsetWidth + 'px';
+    pill.style.height = tab.offsetHeight + 'px';
+    pill.style.transform = 'translateX(' + tab.offsetLeft + 'px)';
+    if (instant) {
+      void pill.offsetWidth;
+      pill.classList.add('ready');
+    }
+  }
+
   function setView(name) {
     if (VIEWS.indexOf(name) < 0) name = 'live';
     var prev = state.view;
     state.view = name;
+    if (prev !== name) {
+      // 两列宽度在这 260ms 里平滑过渡（主站侧栏 404px ↔ 非直播 288px），
+      // 只在切页这一下开 transition —— 常驻的话拖窗口会变得迟钝。
+      //
+      // 顺序很讲究：**必须先让 transition 生效，再去改列定义**。
+      // 两件事写在同一帧里的话，浏览器拿「变化前」的样式（transition: none）
+      // 去判断，根本不会启动过渡（实测列宽依然是「啪」地跳过去）。
+      // 读一次 offsetWidth 强制结算样式，过渡属性就位之后再改 view-other。
+      document.body.classList.add('view-switching');
+      if (viewSwitchTimer) clearTimeout(viewSwitchTimer);
+      viewSwitchTimer = setTimeout(function () {
+        document.body.classList.remove('view-switching');
+      }, 340);
+      void document.body.offsetWidth;
+    }
     document.body.classList.toggle('view-other', name !== 'live');
     document.body.classList.toggle('view-broadcast', name === 'broadcast');
     document.querySelectorAll('.tab').forEach(function (t) {
@@ -1862,9 +2081,19 @@
       var s = document.getElementById('view-' + v);
       if (s) s.classList.toggle('active', v === name);
     });
+    moveTabPill();             // 胶囊滑到新激活的标签上
+    if (prev !== name) {
+      // 方向按标签条里的先后定：往右点就从右进，往左点就从左进
+      var i0 = VIEWS.indexOf(prev), i1 = VIEWS.indexOf(name);
+      enterView((i0 >= 0 && i1 >= 0) ? (i1 > i0 ? 1 : -1) : 0);
+      viewEntered = true;      // 路由这一下已经播过，启动完成时别再播一次
+    }
 
     // 监控室：切进来时才接流（不在首页就连 4 路，省带宽也省对面服务器）
     if (name === 'multi') { bindMulti(); renderMulti(); }
+    // 离开监控室必须销毁：这几路是持续拉流的直播，不销毁就会在后台一直跑，
+    // 反复进出还会累积孤儿连接（重连定时器也一并清掉）。
+    if (prev === 'multi' && name !== 'multi') multiTeardown();
     // 微博：切进来时才取（微博接口慢又是外部服务，没必要在首页就拉）
     if (name === 'weibo') { bindWeibo(); renderWeibo(); }
 
@@ -3030,6 +3259,12 @@
     });
 
     route();
+    /* 清单刚渲染完：让内容淡入一次。切换板块是**整页重载**，没有这一下，
+       新页面会「啪」地出现在眼前（副站还要等接口，落差更明显）。
+       路由时已经播过的话就不重复播。 */
+    if (!viewEntered) enterView(0);      // 首屏没有「前后」可言，只淡入
+    moveTabPill(true);                   // 胶囊首次就位（不带过渡）
+    finishSwitchVeil();                  // 若是「切板块」过来的，撤掉过渡遮罩
     prefetchOthers();                     // 空闲预热其它板块（切过去就不用现抓）
     if (store.get('xl_lang') === 'zh-Hant') setLang('zh-Hant', true);
     checkServer().then(function () {
@@ -3631,6 +3866,23 @@
       applyTheme(nxt.accent);
       try { sessionStorage.setItem('xl_sweep', nxt.accent); } catch (e) { /* 忽略 */ }
     }
+    /* 重载那一小段会露出「骨架态」（框架在、内容是空的），和切换前的画面一比
+       就是一次突变 —— 用户说的「明显卡顿」主要就是它。
+       所以这里先把底色记下来、过一小会儿再盖遮罩：
+         · 不立刻盖，是为了让用户先看见「灯亮了 / 颜色变了」这个反馈；
+         · 记的是**当前**（已经过渡到目标板块）的 --bg，新页面在最早时机用同一个色铺底，
+           于是重载前后的背景是连续的，中间那段空窗就变成「颜色停留」。
+       具体怎么用见 index.html 里那段内联脚本。 */
+    if (veilTimer) clearTimeout(veilTimer);
+    veilTimer = setTimeout(function () {
+      try {
+        sessionStorage.setItem('xl_veil', JSON.stringify({
+          bg: getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#08080a',
+          at: Date.now()
+        }));
+      } catch (e) { /* 忽略 */ }
+      document.documentElement.classList.add('switching');
+    }, 150);
     /* 延迟重载：把连着点几下的操作合并成一次重载（点亮 4 位只刷一次页面）。
        数据源变了必须重建时间轴，整页重载是最省事也最不容易错的做法
        —— 清单与分段都带缓存，重载后列表基本是立刻出来的。 */
@@ -3710,8 +3962,14 @@
      一个视图同时满足「同时看多人」与「监控室」：每格一路，可切内容源。
      音频策略：默认全部静音，点 🔊 只开这一路 —— 几路声音混在一起没法听。 */
   var multiPlayers = [];
+  /* 重连定时器也要一起纳管：断流时 connect() 会挂一个 3 秒后重连的 setTimeout，
+     只清播放器不清定时器的话，回调会在**已经离开监控室**之后照样跑，
+     在已弃用的 <video> 上再接一路流 —— 反复进出就会累积孤儿连接。 */
+  var multiTimers = [];
 
   function multiTeardown() {
+    multiTimers.forEach(function (t) { clearTimeout(t); });
+    multiTimers = [];
     multiPlayers.forEach(function (p) {
       try { p.destroy(); } catch (e) { /* 已经销毁 */ }
     });
@@ -3791,7 +4049,7 @@
         try { p.destroy(); } catch (e) { /* 已销毁 */ }
         if (attempt < maxTry) {
           stateEl.textContent = '连接中断，重连中…（' + (attempt + 1) + '/' + maxTry + '）';
-          setTimeout(function () { connect(qualities, attempt + 1); }, 3000);
+          multiTimers.push(setTimeout(function () { connect(qualities, attempt + 1); }, 3000));
         } else {
           offline('连接中断，可点「刷新开播状态」重试');
         }
@@ -3802,6 +4060,7 @@
     fetch('/api/live/playinfo?station=' + encodeURIComponent(s.id))
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        if (state.view !== 'multi') return;   // 同上：等开播状态回来时可能已经切走了
         cell.classList.remove('loading');
         if (!d || !d.living) {
           offline(d && d.title ? ('未开播 · ' + d.title) : '未开播');
@@ -3866,6 +4125,8 @@
     multiTeardown();
     grid.classList.remove('solo');
     fetchStations().then(function (list) {
+      // 名单是异步回来的：等它回来时用户可能已经切走了 —— 这时不该再接流
+      if (state.view !== 'multi') return;
       if (!list.length) {
         grid.innerHTML = '<p class="sub">没读到主播列表（data/stations.json）。</p>';
         return;
@@ -4131,6 +4392,12 @@
 
   function bootAux() {
     mountStationPicker();
+    // 窗口/顶栏折行后标签位置会变，胶囊要跟着重算；拖动时不必实时跟，
+    // 停一下再就位（用 instant，免得胶囊在拖动过程中乱滑）。
+    window.addEventListener('resize', function () {
+      if (tabPillTimer) clearTimeout(tabPillTimer);
+      tabPillTimer = setTimeout(function () { moveTabPill(true); }, 120);
+    });
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () { init(); bootAux(); });

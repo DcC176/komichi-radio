@@ -4777,5 +4777,99 @@ window.SEGMENTS = {
    "end": 4150,
    "label": ""
   }
+ ],
+ "42347528204": [
+  {
+   "start": 180,
+   "end": 586,
+   "label": ""
+  },
+  {
+   "start": 623,
+   "end": 1087,
+   "label": ""
+  },
+  {
+   "start": 1127,
+   "end": 1467,
+   "label": ""
+  },
+  {
+   "start": 1534,
+   "end": 1779,
+   "label": ""
+  },
+  {
+   "start": 2021,
+   "end": 2449,
+   "label": ""
+  },
+  {
+   "start": 2711,
+   "end": 3044,
+   "label": ""
+  },
+  {
+   "start": 3427,
+   "end": 3658,
+   "label": ""
+  },
+  {
+   "start": 3830,
+   "end": 4259,
+   "label": ""
+  },
+  {
+   "start": 4620,
+   "end": 4860,
+   "label": ""
+  },
+  {
+   "start": 5048,
+   "end": 5335,
+   "label": ""
+  },
+  {
+   "start": 5948,
+   "end": 6167,
+   "label": ""
+  },
+  {
+   "start": 6283,
+   "end": 6738,
+   "label": ""
+  },
+  {
+   "start": 6772,
+   "end": 7112,
+   "label": ""
+  }
+ ],
+ "42347466430": [
+  {
+   "start": 589,
+   "end": 843,
+   "label": ""
+  },
+  {
+   "start": 1039,
+   "end": 1322,
+   "label": ""
+  },
+  {
+   "start": 2232,
+   "end": 2554,
+   "label": ""
+  },
+  {
+   "start": 2554,
+   "end": 2727,
+   "label": ""
+  },
+  {
+   "start": 2739,
+   "end": 3330,
+   "label": ""
+  }
  ]
 };

@@ -64,3 +64,6 @@ data/stations/*/programs_cache.json
 *.bak
 .DS_Store
 Thumbs.db
+
+# 测试产生的注册表备份（内容 = 改动前的 stations.json）
+data/stations.json.bak_*

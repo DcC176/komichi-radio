@@ -25,6 +25,7 @@
 import argparse
 import base64
 import hashlib
+import http.client
 import html
 import json
 import os
@@ -473,6 +474,191 @@ def cur_series():
     return resolve_series(cur_station(), allow_network=False)["series_id"]
 
 
+# ---------------------------------------------------------------- 主播管理（网页里增删）
+#
+# 之前想换主播只能手改 data/stations.json。这里给出写接口，页面设置页直接调。
+# 两个约束（都是踩过的）：
+#   · 写盘必须带 "_version": 2 —— 升级时的 _merge_stations_file 靠它判断
+#     「用户改过」还是「上一版默认值」，版本号不到位用户加的主播会被内置值盖掉。
+#   · 整份覆盖写，不用「临时文件 + os.replace」—— 本机删除被劫持到回收站且 fail-closed。
+
+STATION_FIELDS = ("name", "short", "room", "series_id", "weibo", "accent", "site", "tag")
+MAX_STATIONS = 50
+STATION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+
+
+def _stations_doc_read():
+    try:
+        with open(STATIONS_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        raw = None
+    if not isinstance(raw, dict):
+        raw = {}
+    if not isinstance(raw.get("stations"), list):
+        raw["stations"] = []
+    return raw
+
+
+def _stations_doc_write(doc):
+    os.makedirs(os.path.dirname(STATIONS_FILE), exist_ok=True)
+    with open(STATIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=2)
+        f.write("\n")       # 补个结尾换行，不然每次保存都会在 diff 里多出这一行噪音
+
+
+def _station_field(k, v):
+    """白名单字段 + 长度/格式收敛。绝不能 dict.update(用户输入)。"""
+    v = "" if v is None else str(v).strip()
+    if k in ("name", "short", "site", "tag"):
+        return v[:128]
+    if k == "accent":
+        if v and not re.match(r"^#[0-9a-fA-F]{3,8}$", v):
+            raise ValueError("主题色要写成 #rrggbb 这样的十六进制")
+        return v
+    if k in ("weibo", "room", "series_id"):
+        if v and not v.isdigit():
+            raise ValueError({"weibo": "微博 UID", "room": "房间号",
+                              "series_id": "系列 ID"}[k] + "只要数字")
+        return v
+    return v
+
+
+def probe_mid(mid):
+    """按 UID 查主播名 / 房间号 / 可用的回放来源（只查不写）。
+
+    来源列表直接复用 discover_series()，不另写一套发现逻辑 ——
+    「哪个系列算回放」的判断只有一份，才不会出现两处挑出不同结果。
+    """
+    mid = str(mid or "").strip()
+    if not mid.isdigit():
+        raise RuntimeError("UID 必须是纯数字（B 站空间号：个人主页网址"
+                           " space.bilibili.com/<数字> 里那串数字）")
+    live = bili_get("https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids"
+                    "?uids[]=%s" % mid, "https://live.bilibili.com/")
+    if live.get("code") != 0:
+        raise RuntimeError("查主播接口 code=%s %s" % (live.get("code"), live.get("message")))
+    info = ((live.get("data") or {}).get(mid)) or {}
+    if not info:
+        raise RuntimeError("没查到 UID %s：请确认是 B 站空间号（个人主页网址里的数字）" % mid)
+
+    cands, err, suggested = [], "", ""
+    try:
+        found = discover_series(mid)
+        # 归档只支持「系列」（x/series/archives）；合集要走另一个接口，
+        # 而且 season_id 非法时那个接口会返回与本人无关的固定数据 —— 所以不给用户选。
+        cands = [{"id": c["id"], "name": c["name"], "total": c["total"]}
+                 for c in (found.get("candidates") or []) if c.get("kind") == "series"]
+        if found.get("kind") == "series":
+            suggested = found.get("series_id") or ""
+        elif cands:
+            suggested = max(cands, key=lambda c: c["total"])["id"]
+        if not cands:
+            err = "这位的「合集和系列」里还没有可用的系列（只有合集不行，需要是「系列」）"
+    except Exception as e:
+        err = str(e)
+    return {"mid": mid, "name": str(info.get("uname") or "").strip(),
+            "room": str(info.get("room_id") or ""),
+            "living": int(info.get("live_status") or 0) == 1,
+            "sources": cands, "suggested": suggested, "error": err}
+
+
+def _stations_payload():
+    """给前端的精简列表（不含内部字段）。"""
+    return [{"id": s.get("id"), "name": s.get("name"), "short": s.get("short"),
+             "mid": s.get("mid"), "room": s.get("room"), "main": bool(s.get("main")),
+             "accent": s.get("accent") or "", "weibo": s.get("weibo") or "",
+             "series_id": s.get("series_id") or ""}
+            for s in load_stations(force=True)]
+
+
+def api_stations_probe(obj):
+    try:
+        return 200, {"ok": True, "probe": probe_mid(obj.get("mid"))}
+    except Exception as e:
+        return 502, {"error": str(e)}
+
+
+def api_stations_save(obj):
+    """新增或更新一位主播。id 为空时按 mid 生成（mid 是纯数字，天然 ASCII 安全且唯一）。"""
+    mid = str(obj.get("mid") or "").strip()
+    if not mid.isdigit():
+        return 400, {"error": "UID 必须是纯数字（B 站空间号：个人主页网址里的数字）"}
+    sid = str(obj.get("id") or "").strip() or mid
+    if not STATION_ID_RE.match(sid):
+        return 400, {"error": "标识只能用字母 / 数字 / _ / -（它同时是数据目录名）"}
+    try:
+        fields = dict((k, _station_field(k, obj.get(k))) for k in STATION_FIELDS if k in obj)
+    except ValueError as e:
+        return 400, {"error": str(e)}
+
+    doc = _stations_doc_read()
+    items = [s for s in doc["stations"] if isinstance(s, dict)]
+    cur = None
+    for s in items:
+        if str(s.get("id")) == sid:
+            cur = s
+            break
+    if cur is None:                       # 同一个 UID 换个 id 来存 → 还是更新原来那位
+        for s in items:
+            if str(s.get("mid")) == mid:
+                cur = s
+                break
+    if cur is None:
+        if len(items) >= MAX_STATIONS:
+            return 400, {"error": "最多 %d 位主播" % MAX_STATIONS}
+        # 新增先探测：UID 不存在就别写进去（否则会留一个"主播 123"的空壳板块）。
+        # 更新时不再探测 —— 改个主题色不该因为对方接口抖动就失败。
+        try:
+            p = probe_mid(mid)
+        except Exception as e:
+            return 502, {"error": str(e)}
+        base_name = p["name"] or ("主播 " + mid)
+        cur = {"id": sid, "mid": mid, "main": False,
+               "name": base_name, "short": base_name[:6], "room": p["room"]}
+        items.append(cur)
+    cur["id"] = sid
+    cur["mid"] = mid
+    cur.update(fields)
+    if not cur.get("name"):
+        cur["name"] = "主播 " + mid
+    if not cur.get("short"):
+        cur["short"] = str(cur["name"])[:6]
+    doc["stations"] = items
+    doc["_version"] = STATIONS_VERSION     # 没有它，下次释放网页时这一位会被内置值盖掉
+    try:
+        _stations_doc_write(doc)
+    except OSError as e:
+        return 500, {"error": "写 data/stations.json 失败：%s" % e}
+    # load_stations 有 30 秒缓存：不主动失效，用户得等半分钟才看到新主播，
+    # 会以为保存失败了。
+    return 200, {"ok": True, "id": sid, "stations": _stations_payload()}
+
+
+def api_stations_delete(obj):
+    sid = str(obj.get("id") or "").strip()
+    if not sid:
+        return 400, {"error": "缺少 id"}
+    doc = _stations_doc_read()
+    items = [s for s in doc["stations"] if isinstance(s, dict)]
+    hit = [s for s in items if str(s.get("id")) == sid]
+    if not hit:
+        return 400, {"error": "没有这位主播"}
+    if hit[0].get("main"):
+        return 400, {"error": "主站不能删除"}
+    if len(items) <= 1:
+        return 400, {"error": "至少要留一位主播"}
+    doc["stations"] = [s for s in items if str(s.get("id")) != sid]
+    doc["_version"] = STATIONS_VERSION
+    try:
+        _stations_doc_write(doc)
+    except OSError as e:
+        return 500, {"error": "写 data/stations.json 失败：%s" % e}
+    # 不清理 data/stations/<id>/ 里的缓存：本机删除被劫持到回收站且 fail-closed，
+    # 而那些缓存留着完全无害。
+    return 200, {"ok": True, "id": sid, "stations": _stations_payload()}
+
+
 def _series_warmup():
     """后台逐个主播发现回放系列（错开间隔，避免触发风控 412）。
 
@@ -726,7 +912,141 @@ def api_status(force=False):
     return 200, info
 
 
+# ---------------------------------------------------------------- 到 CDN 的连接复用
+#
+# 实测（到 upos-sz-*.bilivideo.com，取 256KB）：**新建连接 TTFB ≈57ms，复用 ≈12ms**，
+# 也就是每个请求白付约 44ms 的 TCP+TLS 握手钱。而缩略图和媒体分片都是密集小请求
+# （一屏十几张图、一段视频几百个分片），这笔钱加起来很显眼。
+# 所以按 host 在**线程内**复用连接 —— http.client 的连接不是线程安全的。
+# 池必须**跨线程共享**：ThreadingHTTPServer 每个请求新起一个线程，
+# 按线程存的池永远不会命中（第一版就是这么写的，等于白做）。
+# 连接本身不是线程安全的，所以用「借用 → 用完归还」加锁管理。
+_POOL = {}
+_POOL_LOCK = threading.Lock()
+_POOL_MAX = 8                   # 每个 host 最多留几条空闲连接
+_POOL_CTX = ssl.create_default_context()
+
+
+def _borrow(host, port):
+    key = (host, port)
+    with _POOL_LOCK:
+        lst = _POOL.get(key)
+        if lst:
+            return key, lst.pop()
+    return key, http.client.HTTPSConnection(host, port, timeout=40, context=_POOL_CTX)
+
+
+def _give_back(key, conn):
+    with _POOL_LOCK:
+        lst = _POOL.setdefault(key, [])
+        if len(lst) < _POOL_MAX:
+            lst.append(conn)
+            return
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+class _Cached(object):
+    """一次「借用连接 → 请求 → 归位」。
+
+    响应**读到底**（isclosed）才把连接放回池；出错或没读完就丢掉 ——
+    没读完的连接留着会被下一个请求撞上，那才是真正的坑。
+    """
+
+    def __init__(self, key, conn, resp):
+        self.key, self.conn, self.resp = key, conn, resp
+
+    def __enter__(self):
+        return self.resp
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.conn is not None:
+            if exc_type is None and self.resp.isclosed():
+                _give_back(self.key, self.conn)
+            else:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+        return False
+
+
+def cached_get(target, headers, timeout=40):
+    """复用连接的 GET，配合 `with` 使用。
+
+    复用失败（连接被对端关了等）就退回原来的 urlopen（新建连接 + 系统代理回落）——
+    那条回落路径是 2026-09-27 代理故障后加的，不能因为这次优化丢掉。
+    """
+    try:
+        u = urllib.parse.urlsplit(target)
+    except ValueError:
+        u = None
+    if not u or u.scheme != "https" or not u.hostname:
+        return _Cached(None, None,
+                       urlopen(urllib.request.Request(target, headers=headers), timeout))
+    key, conn = _borrow(u.hostname, u.port or 443)
+    try:
+        path = u.path + (("?" + u.query) if u.query else "")
+        conn.request("GET", path, headers=headers)
+        return _Cached(key, conn, conn.getresponse())
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return _Cached(None, None,
+                       urlopen(urllib.request.Request(target, headers=headers), timeout))
+
+
 IMG_CACHE = {}          # 缩略图内存缓存：url → (content_type, bytes)
+
+# ---------------------------------------------------------------- 代取目标白名单
+#
+# /api/stream 与 /api/img 的目标地址来自 URL 参数（base64url）。原先只校验
+# `startswith("http")`，等于开了个「任意 URL 代理」；而 SESSDATA 又无条件附带 ——
+# 于是任意本机页面插一个 <img src="…/api/stream?u=<attacker>">，本机服务就会带着
+# 用户的 B 站会话凭据去请求 attacker 的主机（服务只绑 127.0.0.1，所以是
+# 「本机任意页面可触发」，不是互联网可触发，但正常使用路径下确实可利用）。
+# 所以这里改成**主机白名单**：只放行 B 站自己的媒体/图片域名。
+# 清单来自实测：播放地址 = upos-sz-*.bilivideo.com，缩略图 = i*.hdslb.com，
+# 微博图床 = *.sinaimg.cn（不凭印象写，写窄了会打断播放）。
+MEDIA_HOSTS = ("hdslb.com", "bilivideo.com", "bilibili.com", "akamaized.net",
+               "szbdyd.com", "sinaimg.cn", "weibo.com")
+# SESSDATA 只跟着发给 B 站系域：CDN 不需要用户身份，带上等于把凭据交出去。
+BILI_HOSTS = ("bilibili.com", "hdslb.com", "bilivideo.com", "szbdyd.com")
+MAX_PROXY_BYTES = 8 * 1024 * 1024     # 代取图片的上限，防止一个 URL 拖爆内存
+
+
+def _safe_target(raw):
+    """解出 base64url 里的目标地址；不是 https 或主机不在白名单内 → 返回空串。"""
+    if not raw:
+        return ""
+    pad = "=" * (-len(raw) % 4)
+    try:
+        t = base64.urlsafe_b64decode(raw + pad).decode("utf-8")
+    except Exception:
+        return ""
+    try:
+        u = urllib.parse.urlsplit(t)
+    except ValueError:
+        return ""
+    if u.scheme != "https" or not u.hostname:
+        return ""
+    h = u.hostname.lower()
+    if not any(h == d or h.endswith("." + d) for d in MEDIA_HOSTS):
+        return ""
+    return t
+
+
+def _is_bili_host(target):
+    """目标是不是 B 站自己的域（决定要不要带登录 Cookie）。"""
+    try:
+        h = (urllib.parse.urlsplit(target).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(h == d or h.endswith("." + d) for d in BILI_HOSTS)
 
 
 def api_img(raw):
@@ -734,14 +1054,8 @@ def api_img(raw):
 
     浏览器直连 i2.hdslb.com 在部分网络下会失败，而本机服务能取到 —— 所以让浏览器只跟 127.0.0.1 通信，图片由这里代取并缓存。
     """
-    if not raw:
-        return 400, None, None
-    pad = "=" * (-len(raw) % 4)
-    try:
-        target = base64.urlsafe_b64decode(raw + pad).decode("utf-8")
-    except Exception as e:
-        return 400, None, None
-    if not target.startswith("http"):
+    target = _safe_target(raw)
+    if not target:
         return 400, None, None
 
     if target in IMG_CACHE:
@@ -751,14 +1065,18 @@ def api_img(raw):
     # 微博图床（sinaimg.cn）不认 B 站 Referer，按域名换一个
     ref = "https://weibo.com/" if "sinaimg.cn" in target else REFERER
     try:
-        req = urllib.request.Request(target, headers={
-            "User-Agent": UA, "Referer": ref, "Accept": "image/*,*/*",
-        })
-        with urlopen(req, 20) as r:
+        # 没读完（超长响应）时上下文管理器自己会把连接丢掉，不用额外处理
+        with cached_get(target, {"User-Agent": UA, "Referer": ref,
+                                 "Accept": "image/*,*/*"}, 20) as r:
             ct = r.headers.get("Content-Type") or "image/jpeg"
-            body = r.read()
+            body = r.read(MAX_PROXY_BYTES)
     except Exception:
         return 502, None, None
+
+    # 上游给什么类型就回什么类型的话，一个返回 text/html 的目标会在**本机源**上
+    # 渲染 HTML（同源即可调用全部 /api/*）。图片代理只回图片类型。
+    if not ct.lower().startswith("image/"):
+        ct = "image/jpeg"
 
     if len(body) < 200 * 1024:      # 只缓存小图，别吃内存
         IMG_CACHE[target] = (ct, body)
@@ -800,14 +1118,36 @@ def dash_data(bvid, cid):
 
 def pick_tracks(data, qn):
     """选轨：视频优先 H.264（兼容性最好），清晰度不超过请求档；音频取最高码率。"""
+    ladder = pick_video_ladder(data, qn)
+    v = ladder[-1] if ladder else None
+    return v, pick_audio(data)
+
+
+def pick_audio(data):
+    """音频取最高码率那条 —— 音轨的数据量比视频小两个量级，不值得为起播牺牲音质。"""
+    auds = (data.get("dash") or {}).get("audio") or []
+    return max(auds, key=lambda x: x.get("bandwidth", 0)) if auds else None
+
+
+def pick_video_ladder(data, qn):
+    """返回**整条清晰度阶梯**（从小到大），而不是只挑最高的那一档。
+
+    只写一档时 dash.js 只能拿它起播：用户选 1080P，起播就得先把一个 1080P 分片
+    （500KB~1MB）下完才出画面。把 ≤ qn 的档都写进 mpd 之后，dash.js 会按自己的
+    ABR 从**最低档**起播、再往上抬 —— 出画面快得多，而 qn 依然是天花板
+    （用户选了 480P 就不会拿到 1080P）。
+    同一档位可能有多条（不同 codec / 码率），每档只留码率最高的一条。
+    """
     dash = data.get("dash") or {}
     vids = dash.get("video") or []
-    auds = dash.get("audio") or []
     cands = [v for v in vids if v.get("codecid") == 7] or vids
-    ok = [v for v in cands if v["id"] <= qn]
-    v = max(ok or cands, key=lambda x: (x["id"], x["bandwidth"]))
-    a = max(auds, key=lambda x: x["bandwidth"]) if auds else None
-    return v, a
+    ok = [v for v in cands if v["id"] <= qn] or cands
+    best = {}
+    for v in ok:
+        k = v["id"]
+        if k not in best or v.get("bandwidth", 0) > best[k].get("bandwidth", 0):
+            best[k] = v
+    return [best[k] for k in sorted(best)]
 
 
 def parse_int(s, default):
@@ -859,7 +1199,11 @@ def api_dash(host, query):
         return 502, {"error": warn}
 
     dash = data.get("dash") or {}
-    v, a = pick_tracks(data, qn)
+    ladder = pick_video_ladder(data, qn)
+    if not ladder:
+        return 502, {"error": "没有可用的视频轨"}
+    v = ladder[-1]                  # 最高档：返回值里的 id / 描述用它
+    a = pick_audio(data)
     # 协议相对 URL：本地是 http、线上反代是 https，写死 http:// 在 HTTPS 下
     # 会被浏览器按混合内容拦掉。
     base = host if host.startswith(("//", "http://", "https://")) else "//" + host
@@ -891,7 +1235,9 @@ def api_dash(host, query):
            'segmentAlignment="true" startWithSAP="1">%s</AdaptationSet>'
            '<AdaptationSet contentType="audio" mimeType="audio/mp4" '
            'segmentAlignment="true" startWithSAP="1">%s</AdaptationSet>'
-           '</Period></MPD>') % (dur_s, rep(v, "video"), rep(a, "audio"))
+           '</Period></MPD>') % (dur_s,
+                                "".join(rep(t, "video") for t in ladder),
+                                rep(a, "audio"))
 
     return 200, mpd, v["id"], QN_DESC.get(v["id"], str(v["id"]))
 
@@ -900,55 +1246,55 @@ def api_stream(handler, query):
     raw = query.get("u", [""])[0]
     if not raw:
         return 400, {"error": "缺少 u"}
-    pad = "=" * (-len(raw) % 4)
-    try:
-        target = base64.urlsafe_b64decode(raw + pad).decode("utf-8")
-    except Exception as e:
-        return 400, {"error": "u 解码失败：%s" % e}
-    if not target.startswith("http"):
-        return 400, {"error": "非法地址"}
+    target = _safe_target(raw)
+    if not target:
+        return 400, {"error": "非法地址（只接受 B 站自己的媒体域名）"}
 
     hdrs = {"User-Agent": UA, "Referer": REFERER, "Accept": "*/*"}
     rng = handler.headers.get("Range")
     if rng:
         hdrs["Range"] = rng
     s = sessdata()
-    if s:
+    # 登录凭据只发给 B 站自己的域：白名单里的 CDN 不需要身份，
+    # 无条件附带等于把 SESSDATA 交给任何被放行的主机。
+    if s and _is_bili_host(target):
         hdrs["Cookie"] = "SESSDATA=%s" % s
 
     try:
-        req = urllib.request.Request(target, headers=hdrs)
-        resp = urlopen(req, 40)
+        with cached_get(target, hdrs, 40) as resp:
+            handler.send_response(resp.status)
+            ctype = resp.headers.get("Content-Type") or ""
+            if (not ctype) or ctype.startswith("application/octet-stream"):
+                ctype = "video/mp4"      # 上游给的是通用类型，<video> 需要具体的
+            handler.send_header("Content-Type", ctype)
+            for k in ("Content-Length", "Content-Range", "Accept-Ranges"):
+                v = resp.headers.get(k)
+                if v:
+                    handler.send_header(k, v)
+            handler.end_headers()
+            while True:
+                # 用 read1 而不是 read：read(n) 会**阻塞到攒满 n 字节**才开始回写，
+                # 于是「第一个字节」要等 256KB 全到（1.4MB/s 下约 183ms）才发得出去，
+                # 播放器也就晚这么久才开始 append。read1 是有多少发多少（上限给到
+                # 256KB 以免小块太多），首字节跟着数据到达就走。
+                # 历史上的 64KB 瓶颈是**每块都阻塞等满**造成的，不是块小本身。
+                chunk = resp.read1(262144) if hasattr(resp, "read1") else resp.read(262144)
+                if not chunk:
+                    break
+                handler.wfile.write(chunk)
     except urllib.error.HTTPError as e:
         # 地址过期（签名带时效）时把状态原样透出，前端会重新取地址
         handler.send_response(e.code)
         handler.send_header("Content-Length", "0")
         handler.end_headers()
         return None, None
-    except Exception as e:
-        return 502, {"error": "转发失败：%s" % e}
-
-    try:
-        handler.send_response(resp.status)
-        ctype = resp.headers.get("Content-Type") or ""
-        if (not ctype) or ctype.startswith("application/octet-stream"):
-            ctype = "video/mp4"          # 上游给的是通用类型，<video> 需要具体的
-        handler.send_header("Content-Type", ctype)
-        for k in ("Content-Length", "Content-Range", "Accept-Ranges"):
-            v = resp.headers.get(k)
-            if v:
-                handler.send_header(k, v)
-        handler.end_headers()
-        while True:
-            # 256 KB 一块。64 KB 时代理吞吐成为瓶颈 → 视频加载慢的主因。
-            chunk = resp.read(262144)
-            if not chunk:
-                break
-            handler.wfile.write(chunk)
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         # 拖进度条 / 关页面时客户端会直接掐断，属正常现象，不该刷一屏 traceback
         # （连响应头都还没发出去就断开的情况也在这里 —— 关页面时很常见）
+        # 上游还有没读完的数据，`with` 退出时会自动丢掉这条连接。
         pass
+    except Exception as e:
+        return 502, {"error": "转发失败：%s" % e}
     return None, None
 
 
@@ -2696,6 +3042,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(code, {"error": "取图失败"})
             self.send_response(200)
             self.send_header("Content-Type", ct or "image/jpeg")
+            # 类型已在上游收敛成 image/*；再加 nosniff，杜绝浏览器把响应猜成别的东西
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "public, max-age=86400")
             self.end_headers()
@@ -2801,6 +3149,12 @@ class Handler(SimpleHTTPRequestHandler):
         if not isinstance(obj, dict):
             return self._json(400, {"error": "请求体必须是 JSON 对象"})
 
+        if parsed.path == "/api/stations/probe":
+            return self._json(*api_stations_probe(obj))
+        if parsed.path == "/api/stations/save":
+            return self._json(*api_stations_save(obj))
+        if parsed.path == "/api/stations/delete":
+            return self._json(*api_stations_delete(obj))
         if parsed.path == "/api/live/credential":
             return self._json(*api_live_credential(obj))
         if parsed.path == "/api/segments/auto":

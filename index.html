@@ -5,6 +5,40 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>二十四时小路电台 · 四时小路 24 小时直播回放</title>
 <link rel="stylesheet" href="assets/style.css">
+<script>
+/* 切换板块是整页重载（数据源换了，时间轴必须整个重建）。重载会有一小段
+   「骨架态」——页面框架在、内容是空的，和切换前的画面一对比就是一次突变。
+   所以在文档**最早的时机**铺上目标板块的底色把它盖住：旧页面先过渡到这个色，
+   重载期间同色延续，新内容就绪后再淡入。用户看到的是「颜色过渡 + 停留」，不是闪一下。
+   这一小段必须内联：等 style.css / app.js 到位就太晚了。 */
+(function () {
+  try {
+    var v = sessionStorage.getItem('xl_veil');
+    if (!v) return;
+    var d = JSON.parse(v) || {};
+    // 过期的标记一律作废：这只该在一次「切板块」里生效。万一上回没走到收尾
+    // （脚本报错之类）留了残留，也不能让下一次打开页面还蒙着遮罩。
+    if (!d.at || Date.now() - d.at > 10000) {
+      sessionStorage.removeItem('xl_veil');
+      return;
+    }
+    document.documentElement.classList.add('switching');
+    if (d.bg) document.documentElement.style.setProperty('--bg', d.bg);
+    /* 硬兜底：正常路径由 app.js 在内容就绪后撤掉遮罩。
+       万一某条路径没走到那儿（脚本报错、数据一直不来），
+       也不能让整个页面永久藏着 —— 到点无条件放出来。 */
+    setTimeout(function () {
+      document.documentElement.classList.remove('switching');
+    }, 6000);
+  } catch (e) { /* 隐私模式下拿不到 sessionStorage，就当没这回事 */ }
+})();
+</script>
+<style>
+  /* 盖住重载空窗：html 铺底色，body 先不显示（用 opacity 以便淡入而不是硬切） */
+  html.switching { background: var(--bg, #08080a); }
+  html.switching body { opacity: 0; }
+  body { transition: opacity .18s ease-out; }
+</style>
 </head>
 <body>
 <div class="glow"></div>
@@ -16,6 +50,8 @@
     <span class="tb-cur" id="tb-cur">二十四时小路电台</span>
   </div>
   <nav class="tb-tabs">
+    <!-- 激活标签的那颗红色胶囊：不属于任何标签，而是在标签之间滑过去 -->
+    <i class="tb-pill" id="tb-pill" aria-hidden="true"></i>
     <a class="tab" data-view="live" href="#/live">24 小时频道</a>
     <a class="tab" data-view="broadcast" href="#/broadcast">直播间</a>
     <a class="tab" data-view="schedule" href="#/schedule">节目单</a>
@@ -327,8 +363,28 @@
         </div>
         <p class="live-note">回放清单按<b>主播主页 → 合集和系列 → 系列·直播回放</b>自动获取，
           只需要 UID —— 换成别的主播也一样。拿不到时点「重新获取」，或等它自己重试；
-          也可以在 data/stations.json 里手填 series_id 强制指定某个系列。</p>
+          也可以在这里<b>手动指定</b>某位主播用哪个系列（见下面「主播管理」）。</p>
         <div class="live-result" id="series-state"></div>
+      </div>
+      <div class="live-card" style="margin-top:18px">
+        <div class="live-card-h">主播管理</div>
+        <p class="live-note">填 B 站<b>空间号</b>（个人主页网址
+          <code>space.bilibili.com/&lt;数字&gt;</code> 里那串数字），点「检测」自动查出
+          主播名、直播间号与可选的回放系列。加进来的人会出现在顶栏那排色灯里 ——
+          <b>不用再手工改 data/stations.json</b>。</p>
+        <div class="live-send">
+          <input id="st-mid" inputmode="numeric" autocomplete="off" placeholder="主播 UID">
+          <button class="btn small primary" id="st-probe" type="button">检测</button>
+        </div>
+        <label class="seg-auto" id="st-source-box" hidden>回放来源
+          <select id="st-source"></select>
+        </label>
+        <p class="live-note" id="st-source-note" hidden></p>
+        <div class="qp-btns">
+          <button class="btn small primary" id="st-save" type="button" hidden>保存</button>
+        </div>
+        <div class="live-result" id="st-state"></div>
+        <div class="key-list" id="st-list"></div>
       </div>
       <div class="live-card" style="margin-top:18px">
         <div class="live-card-h">从浏览器一键启动</div>
