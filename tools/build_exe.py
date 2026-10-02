@@ -29,7 +29,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "发布")
 BUILD = os.path.join(ROOT, "build")
 
-APP_VERSION = "1.5.1"                     # 程序版本号，每版递增
+APP_VERSION = "1.5.2"                     # 程序版本号，每版递增
 PYI_NAME = "KomichiRadio"                 # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，

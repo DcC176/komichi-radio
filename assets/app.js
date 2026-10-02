@@ -3248,21 +3248,46 @@
         state.cats[p.category] = 1;
         renderChips();
         renderList();
-        rebuildCycle();
+        // soft：紧接着 playProgram 就会设 drift 并加载目标，这里要是把位置
+        // 重置了，用户看到的就是「先跳一下、再跳到点的那期」
+        rebuildCycle(true);
       }
       return true;
     }
     return false;
   }
 
+  function findSegIndex(bvid) {
+    var segs = (state.cycle && state.cycle.segments) || [];
+    for (var i = 0; i < segs.length; i++) {
+      if (segs[i].bvid === bvid) return i;
+    }
+    return -1;
+  }
+
   function playProgram(bvid) {
     ensureInCycle(bvid);
+    /* 清单刷新过、而循环还是旧的（新一期只在 state.all 里）时，这里会找不到它 ——
+       原来就静默 return，用户点了没反应。先 soft 重建再找一次。
+       注意**不要**顺手重定位 segIndex：那会让 tick 先按「当前位置在新段表里
+       对应的段」加载一次，用户看到的就是「先跳到别的期、再跳到点的那期」。
+       soft 重建不动 drift，紧接着下面就设 drift、直接定位到目标。 */
+    if (findSegIndex(bvid) < 0) {
+      rebuildCycle(true);
+      state.cycleStale = false;   // 已经套用了新清单，别再让 tick 重建一次
+    }
     var segs = state.cycle.segments;
     for (var i = 0; i < segs.length; i++) {
       if (segs[i].bvid === bvid) {
         var total = state.cycle.total;
         state.drift = segs[i].start - (now() - CFG.epoch) % total;
         state.drift = ((state.drift % total) + total) % total;
+        /* 必须把这两个锚点清掉：cyclePos() 优先用它们（播放器就绪时用 mediaBase、
+           没就绪时用 wantPos），不清的话刚设好的 drift 根本不会被读到 ——
+           位置还停在上一期，tick 紧接着就按旧位置换段，
+           表现就是「点了 A，画面先跳一下、最后停在 B」。 */
+        state.mediaBase = null;
+        state.wantPos = null;
         applyPlayer(true);
         if (state.view === 'schedule') renderSchedule();
         return;
@@ -3639,9 +3664,13 @@
     var i = findSeg(pos);
     if (i !== state.segIndex) {
       if (state.cycleStale) {
-        // 后台抓到的新清单等到这里才生效：反正马上要换段，顺手把循环重建了
+        /* 后台抓到的新清单等到这里才生效。**必须用 soft 重建**：非 soft 会
+           `drift = 0` 并把位置重算到「当前时刻对应的段」—— 用户刚点了某一期，
+           drift 才设好就被清零，画面跳到别的一期去（实测：点 A 停在 B）。
+           soft 只换段表、不动 drift，位置是连续的。 */
         state.cycleStale = false;
-        rebuildCycle();
+        rebuildCycle(true);
+        state.segIndex = findSeg(cyclePos());
         return;
       }
       state.segIndex = i;
@@ -4044,6 +4073,11 @@
       updateMetaText();
       if (same) return false;
       state.all = live.programs;
+      /* 只标记、不当场重建：段表一变，同一个「位置」就映射到别的段，
+         画面会跳一下。所以等下次自然换段时再套用。
+         代价是列表（用的是 state.all）已经显示新一期、循环里还没有它 ——
+         点它会找不到，所以 playProgram 里补了一次「按需重建」。
+         两边配合才不会出现「点了没反应」或者「先跳一下再跳过去」。 */
       state.cycleStale = true;
       renderChips();
       renderList();
