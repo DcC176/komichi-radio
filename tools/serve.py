@@ -2655,6 +2655,93 @@ def api_segments_refresh():
                  "missing_parts": missing}
 
 
+SEG_SAVE_MAX = 400          # 单个分P 的段数上限：写错了也不会灌进几万条
+
+
+def _write_segments_file(path, data):
+    """按与 auto_segments.py 完全一致的格式落盘，并留一份 .bak。
+
+    先写 .tmp 再 os.replace 原子替换：写到一半被打断（关页面、杀进程）时，
+    原文件仍然是完整的可用版本，不会留下一个半截的 segments.js。
+    """
+    try:
+        shutil.copyfile(path, path + ".bak")
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("/* 由 tools/auto_segments.py 自动生成，可用页面「标注」手工修正 */\n")
+        f.write("/* 每一版都会把上一版备份到 segments.js.bak */\n")
+        f.write("window.SEGMENTS = ")
+        json.dump(data, f, ensure_ascii=False, indent=1)
+        f.write(";\n")
+    os.replace(tmp, path)
+
+
+def _clean_segments(segs):
+    """把前端传来的段列表洗成干净的 [[start,end,label?],…] 形态。
+
+    接口不能假设调用方守规矩：NaN、倒置、重叠、重复都可能出现，
+    清洗一遍再落盘，免得写进去的东西把整个分P 的播放裁没了。
+    """
+    clean = []
+    for s in segs if isinstance(segs, list) else []:
+        if not isinstance(s, dict):
+            continue
+        try:
+            a, b = float(s.get("start")), float(s.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if not (a == a and b == b):          # NaN
+            continue
+        a, b = max(0.0, a), max(0.0, b)
+        if b - a < 1:
+            continue
+        item = {"start": int(round(a)), "end": int(round(b))}
+        lab = str(s.get("label") or "").strip()[:40]
+        if lab:
+            item["label"] = lab
+        clean.append(item)
+    clean.sort(key=lambda x: (x["start"], x["end"]))
+    out = []
+    for s in clean:                          # 重叠的并成一段（前端也会挡，这里兜底）
+        if out and s["start"] <= out[-1]["end"]:
+            out[-1]["end"] = max(out[-1]["end"], s["end"])
+        else:
+            out.append(s)
+    return out[:SEG_SAVE_MAX]
+
+
+def api_segments_save(obj):
+    """POST /api/segments/save {cid, segments:[{start,end,label?}]} —— 标注落盘。
+
+    走这条接口，网页里改完点一下就存回 segments.js 了。原来标注只能把文本框里的
+    JSON 手工复制进 data/segments.js —— 浏览器写不了本地文件，等于「标了也存不下来」，
+    这个功能一直是摆设。
+    segments 传空数组 = 删掉该分P 的分段（回到整段播放）。
+    """
+    cid = str(obj.get("cid") or "").strip()
+    if not cid:
+        return 400, {"error": "缺少 cid"}
+    if not isinstance(obj.get("segments"), list):
+        return 400, {"error": "segments 必须是数组"}
+    clean = _clean_segments(obj.get("segments"))
+    path = segments_file()
+    data = _read_segments_file(path)
+    if clean:
+        data[cid] = clean
+    else:
+        data.pop(cid, None)          # 清空 = 这个分P 回到整段播放
+    try:
+        _write_segments_file(path, data)
+    except OSError as e:
+        return 500, {"error": "写入 segments.js 失败：%s" % e}
+    print("[seg] 手工标注已保存：cid %s → %d 段（备份 segments.js.bak）" % (cid, len(clean)))
+    return 200, {"ok": True, "cid": cid, "segments": len(clean),
+                 "parts": len(data)}
+
+
 # ---------------------------------------------------------------- 关掉网页就退出
 # 页面关闭/刷新时用 sendBeacon 说一声，服务端等一小会儿没人回来就自己退出；
 # 心跳是兜底（浏览器崩了、被强杀时 beacon 发不出来），超时给得宽松，
@@ -3295,6 +3382,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(*api_segments_auto(obj.get("on")))
         if parsed.path == "/api/segments/refresh":
             return self._json(*api_segments_refresh())
+        if parsed.path == "/api/segments/save":
+            return self._json(*api_segments_save(obj))
         if parsed.path == "/api/series/refresh":
             return self._json(*api_series_refresh(obj))
         if parsed.path == "/api/page/bye":

@@ -349,7 +349,9 @@
     wantPos: null,                          // 本次加载期望的频道位置（视频就绪前的回退）
     offline: false,                         // 本机服务不可用
     retried: {},                            // 已重试过的单元，避免出错循环
-    marks: store.get('xl_marks', [])        // 人工标注的点位
+    // 标注：编辑中的分段副本与「改过没」标记（保存成功才写回 window.SEGMENTS）。
+    // pendingStart 是「按了 M 记下起点、还没记终点」的那一次。
+    segDraft: {}, segDirty: {}, pendingStart: null
   };
 
   var el = {};
@@ -2383,60 +2385,207 @@
       ? state.cycle.segments[state.segIndex] : null;
   }
 
-  // 把当前播放位置记为一个点：同一分P 内交替记「开始 / 结束」
+  // 当前播放位置在「本分P 内」的秒数 —— 不是频道位置，也不是媒体时间
+  function segPosNow() {
+    var seg = currentSeg();
+    return seg ? Math.round(seg.t0 + (cyclePos() - seg.start)) : null;
+  }
+
+  /* 编辑用的副本：cid -> [{start,end,label?}]。
+     不直接改 window.SEGMENTS —— 那份是正在播的数据，改到一半（还没保存）就影响播放，
+     用户会以为自己已经存过了。保存成功才覆盖它。 */
+  function draftOf(cid) {
+    cid = String(cid);
+    if (!state.segDraft[cid]) {
+      state.segDraft[cid] = (segmentsOf(cid) || []).map(function (s) {
+        var o = { start: Math.round(s.start), end: Math.round(s.end) };
+        if (s.label) o.label = s.label;
+        return o;
+      });
+    }
+    return state.segDraft[cid];
+  }
+
+  function sortDraft(list) {
+    list.sort(function (a, b) { return a.start - b.start; });
+    return list;
+  }
+
+  // 把当前播放位置记为一个点：同一分P 内交替记「起点 / 终点」。
+  // 这一对成型就直接落成一段（不用再搬 JSON）。
   function addMark() {
     var seg = currentSeg();
     if (!seg) return;
-    var at = Math.round(seg.t0 + (cyclePos() - seg.start));
-    var last = state.marks[state.marks.length - 1];
-    var kind = (last && last.cid === String(seg.cid) && last.kind === 'start') ? 'end' : 'start';
-    state.marks.push({
-      cid: String(seg.cid), bvid: seg.bvid, page: seg.page, t: at, kind: kind
-    });
-    store.set('xl_marks', state.marks);
+    var cid = String(seg.cid);
+    var at = segPosNow();
+    var pend = state.pendingStart;
+    if (pend && pend.cid === cid) {
+      state.pendingStart = null;
+      var a = Math.min(pend.t, at), b = Math.max(pend.t, at);
+      if (b - a >= 1) {
+        var list = draftOf(cid);
+        list.push({ start: a, end: b });
+        sortDraft(list);
+        state.segDirty[cid] = true;
+      }
+    } else {
+      state.pendingStart = { cid: cid, t: at };
+    }
     renderMarks();
   }
 
-  function buildSegmentsJson() {
-    var byCid = {};
-    state.marks.forEach(function (m) {
-      (byCid[m.cid] = byCid[m.cid] || []).push(m);
+  // 对某一段做一次编辑。全部走副本，保存前不动播放数据。
+  function editSeg(i, act) {
+    var seg = currentSeg();
+    if (!seg) return;
+    var cid = String(seg.cid);
+    var list = draftOf(cid);
+    var s = list[i];
+    if (!s) return;
+    var at = segPosNow();
+    if (act === 'set-start') {
+      if (at === null || at >= s.end - 1) return;
+      s.start = at;
+    } else if (act === 'set-end') {
+      if (at === null || at <= s.start + 1) return;
+      s.end = at;
+    } else if (act === 'split') {
+      // 拆点离两端太近会把一段拆成一个碎片，直接不响应（按钮 title 里也写了）
+      if (at === null || at <= s.start + 5 || at >= s.end - 5) return;
+      list.splice(i, 1, { start: s.start, end: at }, { start: at, end: s.end });
+    } else if (act === 'del') {
+      list.splice(i, 1);
+    } else if (act === 'add') {
+      // 从当前位置起 3 分钟一段，再自己拖边界 —— 比从零记两个点快
+      if (at === null) return;
+      list.push({ start: at, end: at + 180 });
+    } else if (act === 'merge-next') {
+      var nx = list[i + 1];
+      if (!nx) return;
+      s.end = Math.max(s.end, nx.end);
+      list.splice(i + 1, 1);
+    } else {
+      return;
+    }
+    sortDraft(list);
+    state.segDirty[cid] = true;
+    renderMarks();
+  }
+
+  function saveSegs() {
+    var seg = currentSeg();
+    if (!seg) return;
+    var cid = String(seg.cid);
+    if (!state.segDirty[cid]) return;
+    var list = draftOf(cid).map(function (s) {
+      var o = { start: s.start, end: s.end };
+      if (s.label) o.label = s.label;
+      return o;
     });
-    var out = {};
-    Object.keys(byCid).forEach(function (cid) {
-      var open = null;
-      var list = [];
-      byCid[cid].forEach(function (m) {
-        if (m.kind === 'start') {
-          open = m.t;
-        } else if (open !== null && m.t > open) {
-          list.push({ start: open, end: m.t, label: '' });
-          open = null;
+    el.btnMarkSave.disabled = true;
+    el.btnMarkSave.textContent = '保存中…';
+    // 不带 station：window.fetch 的包装会按当前板块自动补上（自己拼会拼错板块）
+    postJSON('/api/segments/save', { cid: cid, segments: list }).then(function (d) {
+      if (!d || !d.ok) {
+        el.btnMarkSave.disabled = false;
+        el.btnMarkSave.textContent = '保存失败，重试';
+        el.markHint.textContent = '保存失败：' + ((d && d.error) || '服务未响应');
+        return;
+      }
+      // 段表一变，整个循环的时间轴就变了（后面的段全部往前挪），
+      // 于是「同一时刻」落到别的内容上 —— 用户看到的就是「一保存画面就跳了」。
+      // 先记住此刻在播的这一期、播到了第几秒，重建后把 drift 补回去。
+      var keep = null;
+      var s0 = currentSeg();
+      if (s0) keep = { cid: String(s0.cid), inPart: cyclePos() - s0.start + s0.t0 };
+      // 落盘成功才覆盖在用的那份，并重建循环（新的切分立即生效）
+      window.SEGMENTS[cid] = list;
+      state.segDirty[cid] = false;
+      state.pendingStart = null;
+      delete state.segDraft[cid];
+      syncSkip();
+      // soft：只是换了分段表，别把正在播的位置重置 —— 硬重建会把 drift 清零、
+      // 播放跳到「当前时刻对应的位置」，用户刚标完就被甩到别的分P 去了。
+      // 走 soft 后由 tick 自己按新表判断要不要换段，位置是连续的。
+      rebuildCycle(true);
+      // 把「同一期、同一秒」在新时间轴上重新标定（就是把 jumpToSegment 那套 drift 算法
+      // 反过来用一次）：位置不变，用户的观看体验才连续。
+      // 找不到「同一期、同一秒」就说明被改没的正是当前这一处（比如把正在播的段删了），
+      // 那位置本来就无处可归，让 tick 自己按新表重定位即可。
+      if (keep && state.cycle.total > 0) {
+        var segs = state.cycle.segments, totalN = state.cycle.total;
+        for (var k = 0; k < segs.length; k++) {
+          var u = segs[k];
+          if (String(u.cid) === keep.cid && keep.inPart >= u.t0
+              && keep.inPart < u.t0 + u.duration) {
+            var target = u.start + (keep.inPart - u.t0);
+            if (state.mediaBase !== null && el.player && el.player.readyState > 0) {
+              // 正在播：平移时间轴锚点，不碰媒体时间 —— 播放一秒都不断
+              state.cycleBase = target;
+              state.mediaBase = el.player.currentTime;
+            } else {
+              state.drift = ((target - (now() - CFG.epoch) % totalN) % totalN + totalN) % totalN;
+              if (state.wantPos !== null) state.wantPos = target;
+            }
+            break;
+          }
         }
-      });
-      if (list.length) out[cid] = list;
+        state.segIndex = findSeg(cyclePos());   // 老索引在新表里指向的是别人，按位置重定位
+      }
+      renderMarks();
     });
-    return 'window.SEGMENTS = ' + JSON.stringify(out, null, 1) + ';';
+  }
+
+  function buildSegmentsJson(cid) {
+    var one = {};
+    one[cid] = draftOf(cid);
+    return 'window.SEGMENTS = ' + JSON.stringify(one, null, 1) + ';';
   }
 
   function renderMarks() {
     var seg = currentSeg();
-    var cid = seg ? String(seg.cid) : null;
-    var mine = state.marks.filter(function (m) { return m.cid === cid; });
+    if (!seg) {
+      el.markCur.textContent = '—';
+      el.markList.innerHTML = '<li class="mp-empty">先回到「回放」页选一期</li>';
+      el.markJson.value = '';
+      el.markHint.textContent = '';
+      return;
+    }
+    var cid = String(seg.cid);
+    var list = draftOf(cid);
+    var pend = (state.pendingStart && state.pendingStart.cid === cid) ? state.pendingStart : null;
+    var dirty = !!state.segDirty[cid];
 
-    el.markCur.textContent = seg
-      ? seg.program.title + ' · 分P ' + seg.page + ' · cid ' + seg.cid
-        + ' · 本分P 已标 ' + mine.length + ' 个点'
-      : '—';
+    el.markCur.textContent = seg.program.title + ' · 分P ' + seg.page
+      + ' · cid ' + seg.cid + ' · ' + list.length + ' 段'
+      + (dirty ? ' · 未保存' : '')
+      + (pend ? ' · 起点已记 ' + fmtClock(pend.t) + '（再按 M 记终点）' : '');
 
-    el.markList.innerHTML = mine.length
-      ? mine.map(function (m) {
-          return '<li>' + fmtClock(m.t) + '　<b>'
-            + (m.kind === 'start' ? '开始' : '结束') + '</b></li>';
+    el.markList.innerHTML = list.length
+      ? list.map(function (s, i) {
+          return '<li class="mp-row">'
+            + '<button class="mp-t" data-act="seek" data-i="' + i + '" title="跳到这段开头">'
+            + fmtClock(s.start) + '</button>'
+            + '<span class="mp-dash">–</span>'
+            + '<button class="mp-t" data-act="seek-end" data-i="' + i + '" title="跳到这段结尾">'
+            + fmtClock(s.end) + '</button>'
+            + '<span class="mp-len">' + fmtDur(s.end - s.start) + '</span>'
+            + '<span class="mp-acts">'
+            + '<button data-act="set-start" data-i="' + i + '" title="用当前播放位置当起点">起</button>'
+            + '<button data-act="set-end" data-i="' + i + '" title="用当前播放位置当终点">止</button>'
+            + '<button data-act="split" data-i="' + i + '" title="在当前播放位置切开（离两端 5 秒内不响应）">拆</button>'
+            + '<button data-act="merge-next" data-i="' + i + '" title="与下一段合并">并</button>'
+            + '<button data-act="del" data-i="' + i + '" title="删除这一段">删</button>'
+            + '</span></li>';
         }).join('')
-      : '<li class="mp-empty">还没有标记（播放到片段开头按 M）</li>';
+      : '<li class="mp-empty">这个分P 还没有分段：播到开头按 M，到结尾再按 M</li>';
 
-    el.markJson.value = buildSegmentsJson();
+    el.markJson.value = buildSegmentsJson(cid);
+    el.btnMarkSave.disabled = !dirty;
+    el.btnMarkSave.textContent = dirty ? '保存到服务端' : '已保存';
+    el.markHint.textContent = dirty
+      ? '改完点「保存到服务端」写回 segments.js（自动留一份 .bak）'
+      : '与 segments.js 一致';
   }
 
   function toggleMarking(on) {
@@ -3372,22 +3521,49 @@
     el.btnMark.addEventListener('click', function () { toggleMarking(); });
 
     el.btnMarkUndo.addEventListener('click', function () {
-      var seg = currentSeg();
-      if (!seg) return;
-      for (var i = state.marks.length - 1; i >= 0; i--) {
-        if (state.marks[i].cid === String(seg.cid)) { state.marks.splice(i, 1); break; }
+      if (state.pendingStart) {           // 只撤「记了起点还没记终点」的那一次
+        state.pendingStart = null;
+        renderMarks();
+        return;
       }
-      store.set('xl_marks', state.marks);
-      renderMarks();
+      el.markHint.textContent = '没有待撤销的点：按 M 记下起点后才有得撤';
     });
 
+    // 清空 == 把该分P 的分段全删掉（回到整段播放）。只改副本，
+    // 要按「保存到服务端」才真的落盘 —— 免得手滑一下就把几小时的标注清了。
     el.btnMarkClear.addEventListener('click', function () {
       var seg = currentSeg();
       if (!seg) return;
       var cid = String(seg.cid);
-      state.marks = state.marks.filter(function (m) { return m.cid !== cid; });
-      store.set('xl_marks', state.marks);
+      state.segDraft[cid] = [];
+      state.pendingStart = null;
+      state.segDirty[cid] = true;
       renderMarks();
+      el.markHint.textContent = '已清空（还没保存）—— 点「保存到服务端」才真的删掉';
+    });
+
+    el.btnMarkSave.addEventListener('click', saveSegs);
+
+    // 段列表里的操作全部用事件委托：列表每次编辑都整体重渲染，
+    // 逐个绑监听会不断堆积失效的回调。
+    el.markList.addEventListener('click', function (e) {
+      var b = e.target.closest('button[data-act]');
+      if (!b) return;
+      var seg = currentSeg();
+      if (!seg) return;
+      var cid = String(seg.cid);
+      var act = b.getAttribute('data-act');
+      var i = parseInt(b.getAttribute('data-i'), 10) || 0;
+      var list = draftOf(cid);
+      if (act === 'seek' && list[i]) {
+        jumpToSegment(cid, list[i].start);
+        return;
+      }
+      if (act === 'seek-end' && list[i]) {
+        jumpToSegment(cid, Math.max(0, list[i].end - 1));
+        return;
+      }
+      editSeg(i, act);
     });
 
     // 重载播放器：走 applyPlayer(true)，按时间轴重算偏移，所以位置不丢
@@ -3449,6 +3625,7 @@
       }
       state.segIndex = i;
       state.playingKey = null;
+      state.pendingStart = null;   // 换了分P：上一位「记了起点没记终点」的作废
       applyPlayer(true);
       if (state.view === 'schedule') renderSchedule();
       if (state.marking) renderMarks();
@@ -3660,6 +3837,8 @@
       markJson: document.getElementById('mark-json'),
       btnMarkUndo: document.getElementById('btn-mark-undo'),
       btnMarkClear: document.getElementById('btn-mark-clear'),
+      btnMarkSave: document.getElementById('btn-mark-save'),
+      markHint: document.getElementById('mark-hint'),
       schRows: document.getElementById('sch-rows'),
       schStat: document.getElementById('sch-stat'),
       catCards: document.getElementById('cat-cards'),

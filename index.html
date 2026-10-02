@@ -496,17 +496,20 @@
 
     <div class="mark-panel" id="mark-panel" hidden>
       <div class="qp-h">标注片段</div>
-      <p>片段由 <code>tools/auto_segments.py</code> 从音频响度自动检测，已写入
-        <code>data/segments.js</code>。这里用于<b>手工修正</b>个别不准的地方：
-        播放到片段开头按 <code>M</code>，到片段结尾再按 <code>M</code>，即成对记下一段。
-        标完把下面的 JSON 覆盖到 <code>data/segments.js</code>，再打开「跳过空白」。</p>
+      <p>分段由 <code>tools/auto_segments.py</code> 自动检测。这里<b>直接改</b>不准的地方：
+        列表就是当前分P 的每一段 —— <b>起 / 止</b> 把边界设成当前播放位置，
+        <b>拆</b> 在当前位置切成两段，<b>并</b> 与下一段合并，<b>删</b> 去掉多余段。
+        要新增一段：播到开头按 <code>M</code>，到结尾再按 <code>M</code>。
+        改完点「保存到服务端」即可写入 <code>segments.js</code>（不用再手工搬运 JSON）。</p>
       <div class="mp-cur" id="mark-cur">—</div>
-      <ol class="mp-list" id="mark-list"><li class="mp-empty">还没有标记</li></ol>
+      <ol class="mp-list" id="mark-list"><li class="mp-empty">还没有分段</li></ol>
       <div class="qp-btns">
-        <button class="btn small ghost" id="btn-mark-undo">撤销上一个</button>
+        <button class="btn small ghost" id="btn-mark-undo">撤销上一个点</button>
         <button class="btn small ghost" id="btn-mark-clear">清空本分P</button>
+        <button class="btn small primary" id="btn-mark-save">已保存</button>
       </div>
-      <textarea class="mp-json" id="mark-json" readonly rows="5" spellcheck="false"></textarea>
+      <div class="mp-hint" id="mark-hint"></div>
+      <textarea class="mp-json" id="mark-json" readonly rows="4" spellcheck="false"></textarea>
     </div>
 
     <div class="chapters-panel" id="chapters-panel" hidden>
