@@ -2484,6 +2484,26 @@
     return best ? best.v : null;
   }
 
+  /* 画面「已唱」浮层每登记一次 = 主播开始唱下一首歌（tools/seg_refine.py 读的）。
+     登记时刻存在 data/sung.js（window.SUNGKEYS），序号就是「第几首」——
+     比按段长估「约 N 首」准得多，所以有它就用它。
+     返回 { k: 第几首, n: 这段里有几次登记, total: 全场共几次 }。 */
+  function sungInfo(keys, seg) {
+    if (!keys || !keys.length) return null;
+    var n = 0, first = -1, atStart = -1;
+    for (var i = 0; i < keys.length; i++) {
+      var t = keys[i];
+      if (t === seg.start && atStart < 0) atStart = i;
+      if (t >= seg.start && t < seg.end) {
+        n++;
+        if (first < 0) first = i;
+      }
+    }
+    if (atStart >= 0) return { k: atStart + 1, n: n, total: keys.length };
+    if (n) return { k: first + 1, n: n, total: keys.length };
+    return null;
+  }
+
   function renderChapters() {
     var seg = currentSeg();
     if (!seg) {
@@ -2536,18 +2556,37 @@
             else if (curIdx >= 0 && i < curIdx) cls += ' past';
           }
           var L = labelFor(lab, s);
-          // 没有读到任何画面文字的段：歌曲场按段长估算大约几首（中位一首约 3.8 分钟），
-          // 其余场次没有歌，按「第 N 段」定位。不用「演唱」这类每行都一样的模糊标注。
+          var S = sungInfo((window.SUNGKEYS || {})[g.cid], s);
+          var mySongs = (window.SETLISTS || {})[g.cid] || [];
+          // 自动标注的优先级：
+          //   ① 人工读帧整理的内容标签（最准，但要人整理）
+          //   ② 画面「已唱」浮层的登记时刻 —— 主播每开始唱一首就登记一次，
+          //      序号就是「第几首」；该项数与本场歌单对得上时，直接把歌名填上去
+          //   ③ 都没有才退回按段长估算（中位一首约 3.8 分钟）
           var est = Math.max(1, Math.round((s.end - s.start) / 228));
-          var text = (L && L.label) ? L.label
-            : (isMusic ? ('约 ' + est + ' 首') : ('第 ' + n + ' 段'));
+          var text = null, src = '';
+          if (L && L.label) { text = L.label; src = '内容来自人工读帧'; }
+          else if (S) {
+            // 歌单与登记次数对得上才敢按序号取歌名 —— 对不上说明有漏读/多读，
+            // 错位标歌名比不标更糟
+            if (mySongs.length === S.total && mySongs[S.k - 1]) {
+              text = mySongs[S.k - 1];
+              src = '本场歌单第 ' + S.k + ' 首（画面「已唱」登记点对齐）';
+            } else {
+              text = '第 ' + S.k + ' 首'
+                + (S.n > 1 ? ' 起 · 含 ' + S.n + ' 首' : '');
+              src = '画面「已唱」浮层登记的第 ' + S.k + ' 首';
+            }
+          } else {
+            text = isMusic ? ('约 ' + est + ' 首') : ('第 ' + n + ' 段');
+            src = isMusic ? '该场画面未显示歌名或歌词，此处按段长估算'
+                          : '该场画面未显示文字信息，此处按段落定位';
+          }
           var tip = [];
           if (L && L.sub) tip.push(L.sub);
+          tip.push(src);
           tip.push(fmtClock(s.start) + ' – ' + fmtClock(s.end)
                    + '（' + ((s.end - s.start) / 60).toFixed(1) + ' 分钟）');
-          if (!L || !L.label) tip.push(isMusic
-            ? '该场画面未显示歌名或歌词，此处按段长估算'
-            : '该场画面未显示文字信息，此处按段落定位');
           segHtml += '<button class="' + cls + '" data-cid="' + g.cid
             + '" data-start="' + s.start + '" title="' + esc(tip.join(' · ')) + '">'
             + '<span class="ci">' + n + '</span>'
@@ -3688,21 +3727,33 @@
         mine.push(id);
       });
       if (!mine.length) return Promise.resolve();
-      if (!keepMain) window.SEGMENTS = {};
+      // 登记时刻（自动标注用）与分段同源同目录，一起取回合并
+      function objOf(txt) {
+        return segObject(txt);
+      }
+      if (!keepMain) { window.SEGMENTS = {}; window.SUNGKEYS = {}; }
       return Promise.all(mine.map(function (id) {
-        return fetch('data/segments.js?station=' + encodeURIComponent(id))
-          .then(function (r) { return r.ok ? r.text() : ''; })
-          .then(segObject)
-          .catch(function () { return null; });   // 离线时忽略，页面会提示没有分段
-      })).then(function (objs) {
+        var q = '?station=' + encodeURIComponent(id);
+        return Promise.all([
+          fetch('data/segments.js' + q).then(function (r) { return r.ok ? r.text() : ''; })
+            .then(objOf).catch(function () { return null; }),
+          fetch('data/sung.js' + q).then(function (r) { return r.ok ? r.text() : ''; })
+            .then(objOf).catch(function () { return null; })
+        ]);   // 离线时忽略，页面会提示没有分段
+      })).then(function (pairs) {
         var merged = window.SEGMENTS || {};
-        objs.forEach(function (o) {
-          if (!o) return;
-          for (var k in o) {
-            if (Object.prototype.hasOwnProperty.call(o, k)) merged[k] = o[k];
-          }
+        var keys = window.SUNGKEYS || {};
+        pairs.forEach(function (pair) {
+          [merged, keys].forEach(function (box, i) {
+            var o = pair[i];
+            if (!o) return;
+            for (var k in o) {
+              if (Object.prototype.hasOwnProperty.call(o, k)) box[k] = o[k];
+            }
+          });
         });
         window.SEGMENTS = merged;
+        window.SUNGKEYS = keys;
       });
     }
 

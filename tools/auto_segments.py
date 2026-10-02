@@ -53,7 +53,7 @@ FEAT_VERSION = "f1"
 
 # 分段流程的版本标记。改动判据 / 边界算法后必须递增 —— 否则旧缓存会被命中，
 # 重跑拿到的还是旧结果。v2：开始用「已唱」浮层峰值重建歌曲边界。
-CACHE_VERSION = "s2"
+CACHE_VERSION = "s3"      # s3：长段按「说话型空档」再切（见 split_by_talk）
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -341,6 +341,79 @@ def split_long(segs, rows, max_seg):
         prev = a
         for c in cuts:
             if c - prev >= 60:
+                out.append([prev, c])
+                prev = c
+        out.append([prev, b])
+    return out
+
+
+# ------------------------------------------------- 长段里「几首连成一段」
+# 一段动辄 10 分钟往上，多半是几首歌之间主播报幕/聊了两句，而那几句话
+# 不够长（< min_gap = 50 秒），被合并进同一段。这对「跳过空白」没影响，
+# 但章节列表会变成「约 3 首」这种糊涂账 —— 用户点进去还是得自己拖。
+#
+# 判据是「说话型空档」：人声响（rms 过阈值）但**没有伴奏**（25-100Hz 低于阈值）。
+#   歌与歌之间  = 主播说话（人声响 + 无伴奏）
+#   歌内部换气  = 整体安静（人声也不响）
+# 两者在双判据里都是 mask=False，性质却相反，所以要分开处理。
+#
+# **只切长段**（> LONG_SEG）：全局放宽 min_gap 确实能多切出段，但实测短段
+# （< 2 分钟）会从 20 个涨到 100 个 —— 把歌切碎比不切更糟。只动长段时，
+# 短段数量一个都不变。
+LONG_SEG = 480          # 超过 8 分钟的段才考虑再切
+PIECE_MIN = 180         # 切出来的每块至少 3 分钟
+TALK_MIN = 8            # 「说话型空档」至少持续这么久
+TALK_RATIO = 0.5        # 空档里至少一半的秒数是「人声响但没伴奏」
+
+
+def talk_gaps(rows, a, b, thr, bthr, min_len=TALK_MIN, ratio=TALK_RATIO):
+    """在 [a,b) 内找「说话型空档」，返回 [(起点, 终点)]。"""
+    out = []
+    run = None
+
+    def close(s, e):
+        seg = [r for r in rows if s <= r["t"] < e]
+        if not seg or e - s < min_len:
+            return
+        talk = sum(1 for r in seg
+                   if r["rms_full"] >= thr and r["bass_ratio"] < bthr)
+        if talk / float(len(seg)) >= ratio:
+            out.append((s, e))
+
+    for r in rows:
+        if not (a <= r["t"] < b):
+            continue
+        if r["rms_full"] >= thr and r["bass_ratio"] < bthr:
+            if run is None:
+                run = r["t"]
+        else:
+            if run is not None:
+                close(run, r["t"])
+                run = None
+    if run is not None:
+        close(run, b)
+    return out
+
+
+def split_by_talk(segs, rows, thr, bthr, long_seg=LONG_SEG,
+                  min_piece=PIECE_MIN):
+    """长段内部按「说话型空档」再切 —— 只动长段，短段一个都不会多出来。
+
+    切点取空档的**中间**：两侧各留一点，别切到歌尾/歌头上去。
+
+    实测（63 个分P，特征缓存离线跑）：长段（>8 分钟）213 → 143 个，
+    短段（<2 分钟）20 → 20 个不变；新增切点处「伴奏退出深度」中位 5.6 dB，
+    而原有切点只有 0.7 dB —— 新切点确实落在歌与歌之间，不是歌中间。
+    """
+    out = []
+    for a, b in segs:
+        if b - a <= long_seg:
+            out.append([a, b])
+            continue
+        prev = a
+        for s, e in talk_gaps(rows, a, b, thr, bthr):
+            c = (s + e) // 2
+            if c - prev >= min_piece and b - c >= min_piece:
                 out.append([prev, c])
                 prev = c
         out.append([prev, b])
@@ -759,6 +832,12 @@ def detect(rows, min_seg, min_gap, max_seg=720, snap=90, keys=None):
                                     min_seg=min_seg)
         changed = max(changed, n1, n2)
 
+    # 长段里「几首歌连成一段」的，按说话型空档再切一次。
+    # 放在浮层骨架**之前**：有「已唱」浮层时边界以峰值为准，这里多出来的切点
+    # 只通过 audio_cuts 参与「超长骨架段内部兜底」，不会盖掉峰值骨架。
+    if split:
+        split = split_by_talk(split, rows, thr, bthr)
+
     # 有「已唱」浮层峰值时，以峰值为骨架重建（覆盖上面音频得到的边界）。
     # 这是「避免切掉歌头歌尾」的关键一步：音频的假边界会被整体替换掉。
     if keys:
@@ -879,6 +958,9 @@ def process_part(ff, bvid, part, args, cache):
         report_progress(cid=cid, phases=phases, audio_total=total,
                         refine_ratio=1.0, stage="读取「已唱」浮层")
 
+    if keys:
+        SUNG_KEYS[cid] = [int(k) for k in keys]
+        save_sungkeys(cid, keys)          # 下次命中缓存时也能把它写进 sung.js
     segs, thr, bthr, changed = detect(rows, args.min_seg, args.min_gap,
                                       args.max_seg, args.snap, keys=keys)
     result = [[int(a), int(b)] for a, b in segs]
@@ -901,6 +983,77 @@ def process_part(ff, bvid, part, args, cache):
 def ensure_dirs():
     os.makedirs(CACHE, exist_ok=True)
     os.makedirs(WORK, exist_ok=True)
+
+
+# 本次跑出来的「已唱」浮层登记时刻：cid -> [秒, ...]。
+# 它们是**自动标注**的依据 —— 主播每开始唱一首歌，左上角浮层就把歌名登记进去，
+# 登记时刻与「第几首」一一对应。有了它，章节列表里写的是「第 7 首」而不是
+# 按段长估出来的「约 2 首」；本场歌单（data/setlists.js）的项数对得上时，
+# 还能直接把歌名填上去。
+SUNG_KEYS = {}
+
+
+def sungkey_path(cid):
+    """登记时刻的单分P 缓存。
+
+    为什么要单独存：分段结果命中缓存时整个分P 都会跳过（含抽帧），
+    可「第几首」是从画面里读出来的、跟音频分析无关，跳过了就再也写不进 sung.js。
+    取一次就落盘，之后命中缓存也能读回来。
+    """
+    return os.path.join(CACHE, "sungkeys", "%s.json" % cid)
+
+
+def load_sungkeys(cid):
+    try:
+        with open(sungkey_path(cid), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_sungkeys(cid, keys):
+    try:
+        os.makedirs(os.path.dirname(sungkey_path(cid)), exist_ok=True)
+        with open(sungkey_path(cid), "w", encoding="utf-8") as f:
+            json.dump([int(k) for k in keys], f)
+    except OSError:
+        pass
+
+
+def write_sungkeys(dry_run=False):
+    """把「已唱」登记时刻写进 data/sung.js（与 segments.js 同目录，跟着主播走）。
+
+    只更新本次跑过的分P，其余沿用文件里已有的 —— 命中缓存跳过的分P 本次没重算，
+    它们的登记时刻仍然有效，不该被抹掉。
+    """
+    if not SUNG_KEYS:
+        return 0
+    path = os.path.join(DATA, "sung.js")
+    old = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            m = re.search(r"window\.SUNGKEYS\s*=\s*(\{.*\})\s*;", f.read(), re.S)
+        if m:
+            old = json.loads(m.group(1))
+    except Exception:
+        old = {}
+    merged = dict(old)
+    merged.update(SUNG_KEYS)
+    if dry_run:
+        return len(merged)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("/* 画面「已唱」浮层的登记时刻（秒），由 tools/auto_segments.py 生成 */\n")
+            f.write("/* 每个时刻 = 主播开始唱下一首歌的画面变化点，序号即「第几首」 */\n")
+            f.write("window.SUNGKEYS = ")
+            json.dump({k: sorted(set(int(x) for x in v))
+                       for k, v in merged.items()}, f, ensure_ascii=False, indent=1)
+            f.write(";\n")
+        log("已写入 %s（%d 个分P 有登记时刻）" % (os.path.basename(path), len(merged)))
+    except OSError as e:
+        log("（登记时刻写入失败，不影响分段：%s）" % e)
+    return len(merged)
 
 
 def load_cache(path):
@@ -945,6 +1098,10 @@ def process_program(ff, p, args, cache, cache_path, logf=log):
         key = cache_key(cid, args.min_seg, args.min_gap, args.snap)
         if key in cache and not args.limit_sec:
             logf("      cid %s：命中缓存，跳过" % cid)
+            # 分段跳过了，但「第几首」的登记时刻是独立缓存的，取回来照写 sung.js
+            cached_keys = load_sungkeys(cid)
+            if cached_keys:
+                SUNG_KEYS[cid] = cached_keys
             # 命中缓存也要把进度报满 —— 不然这一分P 的进度条会停在「准备」不动
             report_progress(bvid=p["bvid"], title=p["title"], cid=cid,
                             part_index=idx + 1, parts=parts,
@@ -1078,6 +1235,7 @@ def process_bvid(bvid, logf=None, ff=None, programs=None, **over):
         done += d
         skip += s
     total = write_segments(cache, args.dry_run)
+    write_sungkeys(args.dry_run)
     return {"ok": True, "bvid": bvid, "title": targets[0]["title"],
             "processed": done, "skipped": skip,
             "parts": len(targets[0]["parts"]), "segments": total}
@@ -1145,6 +1303,7 @@ def main():
         process_program(ff, p, args, cache, cache_path)
 
     write_segments(cache, args.dry_run)
+    write_sungkeys(args.dry_run)
     return 0
 
 
