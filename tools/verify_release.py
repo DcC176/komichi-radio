@@ -201,13 +201,38 @@ def main():
         print("OK   最新一集距今 %.1f 天：%s"
               % ((time.time() - newest) / 86400.0, d["programs"][0]["title"]))
 
-        # 再双击一次：不该起第二个实例，而应复用已在跑的那个后立刻退出
+        # 再双击一次：不该起第二个实例，而应复用已在跑的那个。
+        #
+        # 判据是「后续端口上有没有另起一个本服务」，**不是**「第二个进程有没有退出」：
+        # 本机把删除劫持到回收站且 fail-closed，onefile 退出时清理 _MEI 临时目录
+        # （141MB / 上千个文件）会卡住，进程就挂在那儿 —— 那是本机环境，不是「起了
+        # 第二个实例」。拿退出与否判定会间歇性误报（实测 2026-10-03）。
         again = subprocess.Popen([sandbox_exe, "--no-browser"])
+        extra = None
+        for _ in range(12):                 # 最多等 6 秒，够它识别已有实例
+            time.sleep(0.5)
+            for p in range(PORT + 1, PORT + 6):
+                try:
+                    with urllib.request.urlopen(
+                            "http://127.0.0.1:%d/api/ping" % p, timeout=2) as r:
+                        if json.loads(r.read().decode("utf-8")).get("app") == "komichi-radio":
+                            extra = p
+                            break
+                except Exception:
+                    pass
+            if extra:
+                break
+        if extra:
+            print("FAIL 重复双击起了第二个实例（%d 端口上有本服务）" % extra)
+            again.terminate()
+            return 1
+        print("OK   重复双击没有起第二个实例（复用了已有实例，没另占端口）")
         try:
-            rc = again.wait(timeout=30)
-            print("OK   重复双击：立即退出（退出码 %d），复用已有实例" % rc)
+            rc = again.wait(timeout=3)
+            print("OK   第二个进程已自行退出（退出码 %d）" % rc)
         except subprocess.TimeoutExpired:
-            print("FAIL 重复双击起了第二个实例")
+            print("注意 第二个进程未退出 —— 本机删除保护会让 onefile 清 _MEI 时卡住，"
+                  "与环境有关、不影响功能（功能判据见上一条）")
             again.terminate()
         try:
             urllib.request.urlopen(BASE, timeout=5).read()
