@@ -377,6 +377,18 @@
 
   function hhmm(d) { return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
 
+  // 「今天 HH:MM」/「昨天 HH:MM」/「M-D HH:MM」：给「最近核对」「上次更新」这类
+  // 只想知道新不新的地方用，不带星期与全称日期（那是 dayLabel 的活，太长）。
+  function dayStamp(d) {
+    var today = new Date();
+    var d0 = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    var dd = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    var diff = Math.round((dd - d0) / 86400000);
+    if (diff === 0) return '今天 ' + hhmm(d);
+    if (diff === -1) return '昨天 ' + hhmm(d);
+    return (d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + hhmm(d);
+  }
+
   var WEEK = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
   function dayLabel(d) {
@@ -2038,6 +2050,13 @@
              + ' 个分P有分段 · 刷新页面即可看到')
           : ('上一次失败：' + (last.error || '')));
       }
+      // 扫描是每次抓清单都做的（不管有没有活干），它才是「这功能还活着吗」的证据
+      if (d.checked_at) {
+        var ck = d.checked || {};
+        out.push('最近核对：' + dayStamp(new Date(d.checked_at * 1000))
+          + '（' + (ck.missing ? '还有 ' + ck.missing + ' 期待补'
+                              : '清单里的分P 都分好段了') + '）');
+      }
       el.segState.textContent = out.join('\n');
     }).catch(function () { /* 服务未起时静默 */ });
   }
@@ -2055,22 +2074,20 @@
         + (d.current ? '（当前 ' + d.current + '）' : '');
     }
     if (!d.ffmpeg) return '本机没找到 ffmpeg，分段功能不可用';
-    var last = d.last || {};
-    if (!last.at) return '尚未更新过 —— 点右侧按钮开始识别分段';
-    var g = new Date(last.at * 1000);
-    var today = new Date();
-    var stamp = (g.toDateString() === today.toDateString())
-      ? hhmm(g)
-      : (g.getMonth() + 1) + '-' + pad2(g.getDate()) + ' ' + hhmm(g);
-    if (!last.ok) return '上次更新失败（' + stamp + '）：' + (last.error || '未知错误');
-    /* 「上次更新」说的是**最后一次真正干活**的时间，没有待补的分P 时它会一直停在旧日期 ——
-       看起来就像「数据停在那天不动了」。实测用户就是这么误判的（报了「分段停在 9-29」，
-       其实数据是全的，只是 last 还停在 9-29 那一次）。所以先看有没有缺口：
-       分P 全分完了就直接说「已是最新」，把旧日期放到括号里当参考。 */
     var total = (cov || {}).total || 0, have = (cov || {}).have || 0;
+    var last = d.last || {};
+    /* 「上次更新」说的是**最后一次真正干活**的时间。没有待补的回放时它永远停在旧日期，
+       于是界面一直显示「上次更新 9-29」—— 用户据此判定「自动更新坏了」，
+       其实数据是全的（这件事已经让人误判两次了）。所以先看有没有缺口：
+       全分完了就改说「最近核对」，用的 checked_at 是每次扫描都会写的时间戳。 */
     if (total && have >= total) {
-      return '已是最新：' + have + ' 个分P 全部分好段（上次更新 ' + stamp + '）';
+      var c = d.checked_at || 0;
+      var when = c ? ('最近核对 ' + dayStamp(new Date(c * 1000)) + '：') : '';
+      return when + '清单里 ' + have + ' 个分P 全部分好段，没有待补的回放';
     }
+    if (!last.at) return '还有 ' + (total - have) + ' 个分P 没分段 —— 点右侧按钮开始识别';
+    var stamp = dayStamp(new Date(last.at * 1000));
+    if (!last.ok) return '上次更新失败（' + stamp + '）：' + (last.error || '未知错误');
     return '上次更新：' + stamp + ' · 新算 ' + (last.processed || 0) + ' 个分P'
       + (last.title ? ' · ' + last.title : '');
   }

@@ -2247,6 +2247,21 @@ def _seg_state():
         return {}
 
 
+def _seg_auto_on(st):
+    """这位主播开没开自动分段。
+
+    **没有状态文件 = 还没见过这位主播 → 默认开**。原来空字典被当成「关」，
+    结果副站（从来没有各自的 seg_state.json，那份只在主站目录下）的自动分段
+    形同虚设：清单抓了 30~75 期，分段数据始终 0，界面还一句提示都没有。
+    只有用户显式关过（文件里 auto=false）才算关 —— 所以判据是「有没有 auto 这个键」，
+    不是「auto 的值是真是假」：状态文件也会由扫描自己创建（那时还没记 auto），
+    只看值的话第二次扫描就把它当成「用户关了」。
+    """
+    if not st or "auto" not in st:
+        return True
+    return bool(st["auto"])
+
+
 def _seg_save_state(st):
     try:
         path = seg_state_file()
@@ -2399,6 +2414,9 @@ def _seg_worker():
                 SEG_JOB["current"] = None
     finally:
         SEG_JOB["running"] = False
+        # 队列跑完了：如果页面早就关掉、进程只是在等分段（见 _exit_now），现在可以退了
+        if not PAGES and PAGES_SEEN[0]:
+            _schedule_exit(1.0)
 
 
 def segments_enqueue(bvid, program=None):
@@ -2442,31 +2460,47 @@ def segments_autoscan(programs):
     于是被永久漏掉，表现就是「分段停在那一天」（实测卡在 9-28）。
     现在只要还有分P 没分段就排队，按时间从旧到新补，单次最多 SEG_BATCH_MAX 期。
     """
-    if not _seg_state().get("auto"):
+    st = _seg_state()
+    if not _seg_auto_on(st):
         return
     if seg_ffmpeg() == "":
         return                                 # 没有 ffmpeg，排了也白排
-    st = _seg_state()
     if not st.get("seen_upto"):
         st["seen_upto"] = max([p.get("pubdate") or 0 for p in programs] or [0])
+        st["checked_at"] = int(time.time())
+        st.setdefault("auto", True)            # 顺手把「默认开」落成显式记录
         _seg_save_state(st)
         return                                 # 首次开启：只设水位线，不回头翻历史
     have = segments_have()
     missing = [p for p in programs
                if (p.get("parts") or [])
                and any(str(x["cid"]) not in have for x in p["parts"])]
+    # 「核对时间」每次扫描都写。**没有待补的回放时 last.at 会一直停在很久以前**
+    # （它记的是最后一次真正干活的时间），界面上就成了「上次更新 9-29」——
+    # 用户据此判定「自动更新坏了」，其实数据是全的。有了 checked_at，
+    # 界面就能说「刚刚核对过，全部已分段」，如实又不吓人。
+    st["checked_at"] = int(time.time())
+    st["checked"] = {
+        "have": len(have),
+        "total": sum(len(p.get("parts") or []) for p in programs),
+        "missing": len(missing)}
     if not missing:
         # 没缺口了才把水位线推到最新 —— 有缺口时留着旧值，界面上的状态才如实
         newest = max([p.get("pubdate") or 0 for p in programs] or [0])
         if newest > (st.get("seen_upto") or 0):
             st["seen_upto"] = newest
-            _seg_save_state(st)
+        _seg_save_state(st)
         return
     # 缺口**从新到旧**补：用户在意的是「最近几期怎么没更新」，
     # 先花几个小时去啃半年前的旧回放显然不是他想看到的。
-    for p in sorted(missing, key=lambda x: x.get("pubdate") or 0,
-                    reverse=True)[:SEG_BATCH_MAX]:
+    picked = sorted(missing, key=lambda x: x.get("pubdate") or 0,
+                    reverse=True)[:SEG_BATCH_MAX]
+    for p in picked:
         segments_enqueue(p["bvid"], p)
+    _seg_save_state(st)
+    print("[seg] %s：%d 个分P 待补，本轮排队 %d 期（%s）"
+          % (str(cur_station().get("id")), len(missing), len(picked),
+             "、".join(p.get("bvid") or "?" for p in picked)))
 
 
 def _known_parts():
@@ -2488,6 +2522,22 @@ def _known_parts():
                for x in (p.get("parts") or []) if x.get("cid") is not None)
 
 
+def _seg_mine():
+    """当前这个分段作业是不是**本主播**的。
+
+    SEG_JOB 是全局一份（单线程队列，跨主播共用），running/queue 不筛的话，
+    主站会显示「正在更新：还有 3 个投稿排队」—— 而那几期其实是羽啾的。
+    排队时记下的 stations 映射就是用来在报状态时认人的。
+    """
+    sid = str(cur_station().get("id"))
+    st_map = SEG_JOB.get("stations") or {}
+    cur_bv = SEG_JOB["current"]
+    running = bool(SEG_JOB["running"]) and (
+        not cur_bv or str(st_map.get(cur_bv) or "") == sid)
+    queue = [bv for bv in SEG_JOB["queue"] if str(st_map.get(bv) or "") == sid]
+    return running, queue
+
+
 def api_segments_status():
     st = _seg_state()
     seg = _read_segments_file(segments_file())
@@ -2497,28 +2547,37 @@ def api_segments_status():
     total = len(_known_parts() | set(seg))
     # 进度与「还剩多久」：剩余秒数 = 当前分P 没分析完的 + 排队里每个投稿的全部分P 时长；
     # 速率由页面拿 done_seconds / elapsed 自己算，服务端只提供原始数字。
-    prog = SEG_JOB["progress"]
-    b = SEG_JOB["batch"]
+    running, queue = _seg_mine()
+    cur_bv = SEG_JOB["current"] if running else None
+    # 进度数字只在「跑的是本主播的回放」时才有意义，否则一律给空 ——
+    # 拿别人的进度来填自己的面板，进度条会莫名其妙地动。
+    prog = SEG_JOB["progress"] if running else {}
+    b = SEG_JOB["batch"] if running else {"total": 0, "done": 0}
     todo = max(0.0, float(prog.get("audio_total") or 0) * float(prog.get("phases") or 1)
                - seg_work_done(prog))
     # 排队里的投稿按「音频 1 份 + 精修 1 份」估（与模块内的工作量口径一致）；
     # 精修实际可能回退，宁可让剩余时间估长一点，也不要让用户等得比提示的久
     q_phases = 2 if seg_refine_ready() else 1
-    for bv in SEG_JOB["queue"]:
+    for bv in queue:
         p = SEG_PROGRAMS.get(bv)
         if p:
             todo += q_phases * sum(float(x.get("duration") or 0) for x in p.get("parts") or [])
-    elapsed = (time.time() - SEG_JOB["started_at"]) if SEG_JOB["started_at"] else 0.0
+    elapsed = (time.time() - SEG_JOB["started_at"]) if (running and SEG_JOB["started_at"]) else 0.0
     return 200, {
-        "auto": bool(st.get("auto")),
+        "auto": _seg_auto_on(st),
         "ffmpeg": seg_ffmpeg(),
+        # 最近一次扫描核对的时间（不管有没有活干都会更新）—— 见 segments_autoscan
+        "checked_at": int(st.get("checked_at") or 0),
+        "checked": st.get("checked") or {},
         "refine": seg_refine_ready(),
-        "running": SEG_JOB["running"],
-        "current": SEG_JOB["current"],
-        "queue": list(SEG_JOB["queue"]),
-        "done": list(SEG_JOB["done"]),
-        "log": list(SEG_JOB["log"]),
-        "error": SEG_JOB["error"],
+        "running": running,
+        "current": cur_bv,
+        "queue": queue,
+        "done": [d for d in SEG_JOB["done"]
+                 if str((SEG_JOB.get("stations") or {}).get(d.get("bvid")) or "")
+                 == str(cur_station().get("id"))],
+        "log": list(SEG_JOB["log"]) if running else [],
+        "error": SEG_JOB["error"] if running else "",
         "coverage": {"have": len(seg), "total": total,
                      "segments": sum(len(v) for v in seg.values())},
         "last": st.get("last") or {},
@@ -2608,9 +2667,34 @@ EXIT_TIMER = [None]
 SERVER_REF = [None]              # main() 里填，退出定时器要用
 PAGE_GRACE = 2.0                 # 收到 bye 后等这么久（刷新页面会在这个窗口内重新连上）
 PAGE_IDLE = 180.0                # 心跳兜底：这么久没动静就退出
+SEG_EXIT_GRACE = 1800.0          # 还有分段没跑完时，关掉网页后最多再等这么久（30 分钟）
+SEG_EXIT_DEADLINE = [0.0]        # 宽限期的截止时刻；0 = 没在等
+
+
+def _seg_busy():
+    return bool(SEG_JOB.get("running")) or bool(SEG_JOB.get("queue"))
 
 
 def _exit_now():
+    """关掉网页就退出 —— 但**正在补分段时不走**。
+
+    分析一整场回放要十几分钟到半小时，而分段跑在 daemon 线程里，进程一死它就跟着没。
+    于是「页面一关」= 排队里的几期永远补不完：每次开页面都从头开始，进度永远停在 0，
+    自动更新看着就像坏了。所以没跑完就先不退，每 30 秒再看一次；
+    超过 SEG_EXIT_GRACE 照退 —— 已完成的分P 都落盘了，下次接着补，不会白干。
+    /api/quit（脚本 / 命令行停止）直接 shutdown，不走这条路，始终立即生效。
+    """
+    if _seg_busy():
+        now = time.time()
+        if not SEG_EXIT_DEADLINE[0]:
+            SEG_EXIT_DEADLINE[0] = now + SEG_EXIT_GRACE
+            print("网页已关闭，但还有 %d 个投稿在补分段 —— 最多再等 %d 分钟"
+                  "（不想等就直接结束进程，已完成的部分不会丢）"
+                  % (len(SEG_JOB.get("queue") or []) + 1, int(SEG_EXIT_GRACE // 60)))
+        if now < SEG_EXIT_DEADLINE[0]:
+            _schedule_exit(30.0)
+            return
+        print("等分段超时，先退出（下次启动会接着补）")
     srv = SERVER_REF[0]
     if srv:
         try:
@@ -2641,6 +2725,7 @@ def page_alive(cid):
     with PAGE_LOCK:
         PAGES[cid] = time.time()
         PAGES_SEEN[0] = True
+    SEG_EXIT_DEADLINE[0] = 0.0       # 页面回来了，之前那次「等分段」的宽限期作废
     _cancel_exit()
     return 200, {"ok": True}
 
