@@ -1317,6 +1317,7 @@ def api_stream(handler, query):
                 chunk = resp.read1(262144) if hasattr(resp, "read1") else resp.read(262144)
                 if not chunk:
                     break
+                media_touch()      # 长连接期间持续「报到」：只打一次会被当成已经没人在看
                 handler.wfile.write(chunk)
     except urllib.error.HTTPError as e:
         # 地址过期（签名带时效）时把状态原样透出，前端会重新取地址
@@ -2346,6 +2347,27 @@ def segments_have():
     return set(_read_segments_file(segments_file()).keys())
 
 
+# ---------------------------------------------------------------- 播放优先
+# 本机到 B 站实测只有 1~1.4 MB/s（见 api_stream 里那段注释）。分段作业要下载
+# 整轨音频、读「已唱」浮层时还要下载整支视频，和播放抢的是同一条出口 ——
+# 一起跑就会「切一下卡一下、偶尔直接失败」。所以：
+#   · 每个媒体请求都打个时间戳，**长连接的转发循环里每一块都刷新**
+#     （只在请求开头打一次的话，流还没播完就「超时」了，让路等于没做）；
+#   · 分段作业在每个分块开工前问一句「现在有人在看吗」，有人看就先让路。
+MEDIA_SEEN = [0.0]        # 最近一次媒体活动的时刻
+MEDIA_QUIET = 20.0        # 安静这么久才算「没人看」
+MEDIA_PATHS = ("/api/stream", "/api/dash", "/api/dashinfo", "/api/playurl",
+               "/api/live/stream", "/api/live/playinfo")
+
+
+def media_touch():
+    MEDIA_SEEN[0] = time.time()
+
+
+def media_busy():
+    return (time.time() - MEDIA_SEEN[0]) < MEDIA_QUIET
+
+
 def _seg_worker():
     """队列消费者：逐个投稿跑分段。"""
     try:
@@ -2382,6 +2404,7 @@ def _seg_worker():
 
                 mod.LOG_SINK[0] = logf
                 mod.PROGRESS_SINK[0] = _prog_sink
+                mod.PLAYBACK_BUSY[0] = media_busy   # 有人在看就给播放让路
 
                 prog = SEG_PROGRAMS.get(bvid)
                 res = mod.process_bvid(bvid, logf=logf,
@@ -2552,7 +2575,9 @@ def api_segments_status():
     # 进度数字只在「跑的是本主播的回放」时才有意义，否则一律给空 ——
     # 拿别人的进度来填自己的面板，进度条会莫名其妙地动。
     prog = SEG_JOB["progress"] if running else {}
-    b = SEG_JOB["batch"] if running else {"total": 0, "done": 0}
+    # 空档也要带上 done_seconds —— 缺了它下面一取就 KeyError，
+    # 整个状态接口 500，前端每 4 秒轮询一次就崩一次（切到没作业的板块必现）。
+    b = SEG_JOB["batch"] if running else {"total": 0, "done": 0, "done_seconds": 0.0}
     todo = max(0.0, float(prog.get("audio_total") or 0) * float(prog.get("phases") or 1)
                - seg_work_done(prog))
     # 排队里的投稿按「音频 1 份 + 精修 1 份」估（与模块内的工作量口径一致）；
@@ -2573,6 +2598,9 @@ def api_segments_status():
         "running": running,
         "current": cur_bv,
         "queue": queue,
+        # 有人在看视频（最近 20 秒内有媒体请求）—— 分段此时会让路，界面要说清楚，
+        # 否则「进度不动」又会被当成「自动更新坏了」
+        "media_busy": media_busy(),
         "done": [d for d in SEG_JOB["done"]
                  if str((SEG_JOB.get("stations") or {}).get(d.get("bvid")) or "")
                  == str(cur_station().get("id"))],
@@ -3241,6 +3269,8 @@ class Handler(SimpleHTTPRequestHandler):
         # 主播上下文：?station=<id|mid|房间号>，不带则用主站。必须在所有处理之前设置
         use_station(urllib.parse.parse_qs(parsed.query).get("station", [""])[0])
         q = urllib.parse.parse_qs(parsed.query)
+        if parsed.path in MEDIA_PATHS:
+            media_touch()          # 「有人在看」的信号，分段作业据此让路
 
         if parsed.path == "/api/status":
             code, obj = api_status("refresh" in q)

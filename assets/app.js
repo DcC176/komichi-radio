@@ -724,7 +724,25 @@
     var offset = pos - seg.start;
     var key = seg.bvid + '#' + seg.page;
 
-    if (force || key !== state.playingKey) {
+    /* 同一分P 内的段切换（分段切细之后很常见）不需要换媒体：
+       媒体地址、清晰度、整条时间轴都没变，重新取流等于白白再等一次
+       「B 站接口 + 首片缓冲」，用户感觉到的就是「切一下卡一下」。
+       只有跨分P（bvid/page 变了）或媒体根本没就绪时才真的要重新加载。 */
+    var samePart = !force && key === state.playingKey && state.mediaBase !== null
+      && el.player && el.player.readyState > 0;
+    if (samePart) {
+      var want = seg.t0 + offset;
+      var cur = el.player.currentTime;
+      // 只处理「要往前跳」的情形：段与段之间有空隙（跳过空白切出来的那些）时
+      // 跳到新段的起点。无缝衔接就什么都不做 —— 视频一直在播同一支，本来就没断。
+      // 不处理「往后退」：那通常是别的调用者（切标签页、用户自己拖过进度条）
+      // 造成的，擅自 seek 反而会把用户拽回去。
+      if (want > cur + 1.5) {
+        try { el.player.currentTime = want; } catch (e) { /* 忽略 */ }
+        state.mediaBase = want;
+        state.cycleBase = pos;
+      }
+    } else if (force || key !== state.playingKey) {
       state.playingKey = key;
       loadMedia(seg, seg.t0 + offset);
     }
@@ -2073,7 +2091,10 @@
     var queue = (d.queue || []).length;
     if (d.running || queue) {
       return '正在更新：还有 ' + (queue + (d.running ? 1 : 0)) + ' 个投稿排队'
-        + (d.current ? '（当前 ' + d.current + '）' : '');
+        + (d.current ? '（当前 ' + d.current + '）' : '')
+        // 播放和补分段抢的是同一条出口带宽（本机到 B 站实测 1~1.4 MB/s），
+        // 所以有人在看时分段会让路 —— 进度停住不是坏了，说清楚。
+        + (d.media_busy ? ' · 有人在看，分段先让路' : '');
     }
     if (!d.ffmpeg) return '本机没找到 ffmpeg，分段功能不可用';
     var total = (cov || {}).total || 0, have = (cov || {}).have || 0;
@@ -3624,9 +3645,10 @@
         return;
       }
       state.segIndex = i;
-      state.playingKey = null;
+      // 不清 playingKey：applyPlayer 要靠它判断「是不是还在同一个分P」——
+      // 清掉就每次都当成跨分P，重新取一次流（这正是「切一下卡一下」的来源）。
       state.pendingStart = null;   // 换了分P：上一位「记了起点没记终点」的作废
-      applyPlayer(true);
+      applyPlayer(false);
       if (state.view === 'schedule') renderSchedule();
       if (state.marking) renderMarks();
       return;

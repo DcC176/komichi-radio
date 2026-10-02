@@ -135,6 +135,39 @@ def report_progress(**kw):
         sink(kw)
 
 
+# ---- 播放优先：有人在看视频时，分段让路 ----------------------------------
+# 音视频与分段下载走的是同一条出口，而本机到 B 站实测只有 1~1.4 MB/s
+# （tools/serve.py 的转发循环里也算过这个数）。一边补分段一边看，结果就是
+# 「切一下卡一下、偶尔直接失败」—— 分段要下载整轨音频，读「已唱」浮层时
+# 还要下载整支视频，抢起来比播放本身还凶。
+# 网页端把 media_busy() 接进来（tools/serve.py 装），命令行跑时没人接 = 不让路。
+PLAYBACK_BUSY = [None]
+YIELD_STEP = 2.0        # 让路时的轮询间隔
+YIELD_MAX = 120.0       # 单个分块最多让路这么久，免得播放不停就永远不干活
+
+
+def yield_to_playback():
+    """有人在看就等一下再下载。返回实际让路的秒数。"""
+    fn = PLAYBACK_BUSY[0]
+    if fn is None:
+        return 0.0
+    t0 = time.time()
+    told = False
+    while True:
+        try:
+            busy = bool(fn())
+        except Exception:
+            return time.time() - t0
+        waited = time.time() - t0
+        if not busy or waited >= YIELD_MAX:
+            return waited
+        if not told:
+            told = True
+            report_progress(stage="让路中：有人在看，等这一块空下来")
+            log("    （有人在看直播/回放，先让路；最多等 %d 秒）" % int(YIELD_MAX))
+        time.sleep(YIELD_STEP)
+
+
 def get_json(url, referer="https://www.bilibili.com"):
     req = urllib.request.Request(url, headers={
         "User-Agent": UA, "Referer": referer, "Accept-Encoding": "identity"})
@@ -949,6 +982,7 @@ def process_part(ff, bvid, part, args, cache):
         start, dur = job
         slot = slots.get()
         try:
+            yield_to_playback()          # 有人在看就先让路（见 yield_to_playback）
             cwd = os.path.join(WORK, "w%d" % slot)
             os.makedirs(cwd, exist_ok=True)
             for attempt in range(3):                # CDN 偶发 5XX，重试
@@ -992,6 +1026,8 @@ def process_part(ff, bvid, part, args, cache):
     # 都慢好几倍（音频 36s→139s、抽帧 9s→277s），所以必须串行，不要「优化」成并行。
     keys = []
     if args.sung and not args.limit_sec:
+        # 这一步要下载整支视频来抽帧，比音频还占带宽 —— 同样让路
+        yield_to_playback()
         report_progress(cid=cid, phases=phases, audio_total=total,
                         refine_ratio=0.0, stage="读取「已唱」浮层")
         try:
