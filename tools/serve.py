@@ -1041,10 +1041,19 @@ IMG_CACHE = {}          # 缩略图内存缓存：url → (content_type, bytes)
 # 所以这里改成**主机白名单**：只放行 B 站自己的媒体/图片域名。
 # 清单来自实测：播放地址 = upos-sz-*.bilivideo.com，缩略图 = i*.hdslb.com，
 # 微博图床 = *.sinaimg.cn（不凭印象写，写窄了会打断播放）。
-MEDIA_HOSTS = ("hdslb.com", "bilivideo.com", "bilibili.com", "akamaized.net",
-               "szbdyd.com", "sinaimg.cn", "weibo.com")
+#
+# ⚠️ `.cn` 与 `.com` 是两条并列的 CDN，**少一个不是少一点，是整条轨道取不到**：
+# 实测同一期的视频走 cn-jxjj-ct-01-*.bilivideo.com、音频却走
+# xy123x88x176x15xy.mcdn.bilivideo.cn:8082，而白名单只写了 .com ——
+# 音频分片被 /api/stream 回成 400「非法地址」，dash.js 报
+# BUFFER_APPEND_ERROR(27) 然后退到 MP4，界面就是「一直显示 DASH 不可用」。
+# 哪条轨道落到哪个域由 B 站按负载分配，所以这个 bug 表现为「有的期能播、
+# 有的期一直不可用」。
+MEDIA_HOSTS = ("hdslb.com", "bilivideo.com", "bilivideo.cn", "bilibili.com",
+               "akamaized.net", "szbdyd.com", "sinaimg.cn", "weibo.com")
 # SESSDATA 只跟着发给 B 站系域：CDN 不需要用户身份，带上等于把凭据交出去。
-BILI_HOSTS = ("bilibili.com", "hdslb.com", "bilivideo.com", "szbdyd.com")
+BILI_HOSTS = ("bilibili.com", "hdslb.com", "bilivideo.com", "bilivideo.cn",
+              "szbdyd.com")
 MAX_PROXY_BYTES = 8 * 1024 * 1024     # 代取图片的上限，防止一个 URL 拖爆内存
 
 
