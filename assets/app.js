@@ -454,15 +454,28 @@
   /* ---------------------------------------------------------- 时间轴 */
 
   // 确定性洗牌 + 修复（避免相邻节目同类），保证同一份输入永远得到同一条时间轴
-  function buildCycle(programs) {
-    var rng = mulberry32(CFG.seed);
-    var arr = programs.slice();
-    var i, j, tmp;
-
-    for (i = arr.length - 1; i > 0; i--) {
-      j = Math.floor(rng() * (i + 1));
-      tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+  /* 频道顺序的排序键：只取决于「种子 + bvid」，与列表里有几期无关。
+     原来用 mulberry32(seed) 就地洗牌 —— 数组长度一变（新发布了一期回放），
+     整个顺序都会重排，于是清单一刷新整条时间轴错位，正在播的画面被扯到别的期去。
+     换成稳定键之后，新增一期只是插到它该在的位置，其余期的先后不变，
+     刷新时位置也就不会跳。 */
+  function cycleKey(bvid, seed) {
+    var s = String(seed) + '|' + String(bvid);
+    var h = 2166136261 >>> 0;                 // FNV-1a
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619) >>> 0;
     }
+    return h;
+  }
+
+  function buildCycle(programs) {
+    var arr = programs.slice().map(function (p) {
+      return { p: p, k: cycleKey(p.bvid, CFG.seed) };
+    }).sort(function (a, b) {
+      return a.k - b.k;
+    }).map(function (x) { return x.p; });
+    var i, j, tmp;
     for (i = 1; i < arr.length; i++) {
       if (arr[i].category === arr[i - 1].category) {
         for (j = i + 1; j < arr.length; j++) {
@@ -617,9 +630,19 @@
 
   function destroyDash() {
     if (dashPlayer) {
+      // 只 reset 是不够的：dash.js 还会在 <video> 上留着 MediaSource 与事件监听，
+      // 紧接着再 create 一个实例去 attach 同一个元素，就会报错并触发
+      // 「DASH 不可用，已退回 MP4 通道」—— 连续点两次播放正好踩这个。
       try { dashPlayer.reset(); } catch (e) { /* 忽略 */ }
+      try { dashPlayer.detachMediaElement(); } catch (e) { /* 忽略 */ }
+      try { dashPlayer.destroy(); } catch (e) { /* v4 才有，没有就算了 */ }
       dashPlayer = null;
     }
+    // 旧的 MediaSource 挂在元素上时，新实例的 attachSource 会失败
+    try {
+      el.player.removeAttribute('src');
+      el.player.load();
+    } catch (e) { /* 忽略 */ }
   }
 
   // 播放：优先 DASH（1080P 只存在于 DASH 通道），失败再退回 MP4。
@@ -641,6 +664,9 @@
   function loadMedia(seg, seekTo, anchor) {
     if (state.offline) return;
     var key = seg.bvid + '#' + seg.page + '#' + state.qn;
+    // 同一期已经在加载了就别推倒重来 —— 用户「点了没反应，再点一次」很常见，
+    // 而重建一次 dash.js 既慢又容易失败（见 destroyDash 里的注释）。
+    if (state.loadingKey === key && state.loading && dashPlayer) return;
     state.loadingKey = key;
     state.loading = true;
 
@@ -692,12 +718,16 @@
       // dash.js 起播后立刻升档，把出画时间推后了。实测有害，故不设。
       // 服务端 mpd 里仍然写整条阶梯：它的价值在**网络变差时 ABR 能降档**，而不是起播。
     });
+    // 回调要认实例：被销毁的旧实例也会把这两个事件抛出来，
+    // 光比 loadingKey 挡不住「连续点两次、key 恰好相同」的情况。
+    var mine = dashPlayer;
+    var stale = function () { return state.loadingKey !== key || dashPlayer !== mine; };
     dashPlayer.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, function () {
-      if (state.loadingKey !== key) return;
+      if (stale()) return;
       ok();
     });
     dashPlayer.on(dashjs.MediaPlayer.events.ERROR, function () {
-      if (state.loadingKey !== key) return;
+      if (stale()) return;
       fallback();
     });
     try {
@@ -3664,14 +3694,17 @@
     var i = findSeg(pos);
     if (i !== state.segIndex) {
       if (state.cycleStale) {
-        /* 后台抓到的新清单等到这里才生效。**必须用 soft 重建**：非 soft 会
+        /* 后台抓到的新清单在这里生效。**必须用 soft 重建**：非 soft 会
            `drift = 0` 并把位置重算到「当前时刻对应的段」—— 用户刚点了某一期，
            drift 才设好就被清零，画面跳到别的一期去（实测：点 A 停在 B）。
-           soft 只换段表、不动 drift，位置是连续的。 */
+           soft 只换段表、不动 drift，位置是连续的。
+
+           重建后要**按新段表重算并继续走换段流程**，不能只把 segIndex 挪过去
+           就 return —— 那等于「标题已经写着新段、画面还是旧的那一支」，
+           用户看到的就是莫名其妙的错位。 */
         state.cycleStale = false;
         rebuildCycle(true);
-        state.segIndex = findSeg(cyclePos());
-        return;
+        i = findSeg(cyclePos());
       }
       state.segIndex = i;
       // 不清 playingKey：applyPlayer 要靠它判断「是不是还在同一个分P」——
