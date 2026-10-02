@@ -21,6 +21,7 @@
     避开中文名在 spec / build 中间产物上的编码坑。
 """
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -72,6 +73,52 @@ def ensure_pyinstaller():
         print("未安装 PyInstaller，请先运行：")
         print("    %s -m pip install pyinstaller" % sys.executable)
         sys.exit(1)
+
+
+# data/ 下**不该进分发包**的东西：全是运行时数据，体积可到几十上百 MB，
+# 而且每位用户各一份、可重算。`--add-data` 不读 .gitignore，所以必须显式剔除
+# （实测漏剔除时 EXE 从 54MB 涨到 80MB：chu2u 的两个临时 chunk.wav 就占 32MB）。
+DATA_EXCLUDE_DIRS = {"stations"}            # 各主播的清单缓存/分段结果/音频中间产物
+DATA_EXCLUDE_SUFFIX = (".bak", ".bak_test")
+
+
+def _stage_data():
+    """把 data/ 复制一份**不含运行时数据**的暂存副本，返回它的路径。
+
+    用唯一的目录名（`data-stage-<时间戳>`）而不是固定名：本机删除被劫持到回收站
+    且 fail-closed，固定名会因为「上一次的副本删不掉」而反复失败。
+    而且不删旧副本也不影响正确性 —— 每次都用新的那个来打包。
+
+    硬链接优先（省时间省空间，同盘即可），失败则退回普通复制。
+    """
+    stage = os.path.join(BUILD, "data-stage-%d" % int(time.time()))
+    src_root = os.path.join(ROOT, "data")
+    os.makedirs(stage, exist_ok=True)
+
+    linked = copied = 0
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        rel = os.path.relpath(dirpath, src_root)
+        # 顶层就砍掉排除目录（stations/），不进它的子树
+        if rel == ".":
+            dirnames[:] = [d for d in dirnames if d not in DATA_EXCLUDE_DIRS]
+        dst_dir = stage if rel == "." else os.path.join(stage, rel)
+        os.makedirs(dst_dir, exist_ok=True)
+        for fn in filenames:
+            if fn.endswith(DATA_EXCLUDE_SUFFIX):
+                continue
+            s = os.path.join(dirpath, fn)
+            d = os.path.join(dst_dir, fn)
+            try:
+                os.link(s, d)               # 硬链接：同一份数据，不占额外空间
+                linked += 1
+            except OSError:
+                shutil.copy2(s, d)
+                copied += 1
+
+    print("data 暂存：%s（硬链接 %d、复制 %d；已剔除 %s）"
+          % (os.path.basename(stage), linked, copied,
+             "、".join(sorted(DATA_EXCLUDE_DIRS))))
+    return stage
 
 
 def build_exe():
@@ -133,6 +180,8 @@ def build_exe():
         if not os.path.exists(p):
             print("缺少 %s，无法打包" % p)
             sys.exit(1)
+        if item == "data":
+            p = _stage_data()          # data 要剔除运行时子目录，见下
         dest = "." if os.path.isfile(p) else item
         args += ["--add-data", p + os.pathsep + dest]
     args += ["--add-data", ver_file + os.pathsep + "."]
