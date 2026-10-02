@@ -168,11 +168,16 @@ def run_ff(ff, args, timeout=600, cwd=None):
                           creationflags=NO_WINDOW, startupinfo=HIDE_SI)
 
 
-def chunk_features(ff, url, start, dur, wavname, cwd=None):
+def chunk_features(ff, url, start, dur, wavname, cwd=None, feat_name=None):
     """取 [start, start+dur) 的音频并算出逐秒特征。结果按块落盘缓存。
 
     cwd 是临时目录：并发时每个块必须用自己的目录（wav 与 ffmpeg 的输出文件名固定，
     共用一个目录会互相覆盖）。缓存键只跟 cid + start 有关，不受它影响。
+
+    wavname 是**固定的**（chunk.wav，见 process_part）：文件名里带 cid 的话，
+    每分析一个分P 就多留一个几十 MB 的 wav，跑几十期就是好几个 G；
+    而本机的删除保护会让 os.remove 失败，清不掉。固定名 + 每 slot 一个目录 = 覆盖写，
+    占用恒定。特征缓存不能跟着固定 —— 它按 cid 区分，所以用 feat_name 单独传进来。
 
     特征（每秒一组，因为 asetnsamples=n=16000 配 16kHz 正好一秒一块）：
         rms_full    整体响度
@@ -189,7 +194,9 @@ def chunk_features(ff, url, start, dur, wavname, cwd=None):
     所以统一用相对文件名并在工作目录下执行。
     """
     cwd = cwd or WORK
-    fc = os.path.join(FEAT, "%s_%d_%s.json" % (wavname[:-4], start, FEAT_VERSION))
+    # 特征缓存按 cid 命名（feat_name），不跟着 wav 的固定名走 —— 否则不同分P 会互相命中
+    fc = os.path.join(FEAT, "%s_%d_%s.json"
+                      % (feat_name or wavname[:-4], start, FEAT_VERSION))
     if os.path.exists(fc):
         try:
             with open(fc, encoding="utf-8") as f:
@@ -817,7 +824,9 @@ def process_part(ff, bvid, part, args, cache):
             for attempt in range(3):                # CDN 偶发 5XX，重试
                 try:
                     return chunk_features(ff, part["_url"], start, dur,
-                                          "chunk_%s.wav" % cid, cwd=cwd)
+                                          "chunk.wav", cwd=cwd,
+                                          # 特征缓存名沿用旧格式，已跑出来的那批还能命中
+                                          feat_name="chunk_%s" % cid)
                 except Exception as e:
                     if attempt == 2:
                         log("      ! %d-%ds 失败（已重试 3 次）：%s"
@@ -839,7 +848,13 @@ def process_part(ff, bvid, part, args, cache):
                             audio_total=total, phases=phases, stage="分析音频")
     if workers == 1:
         time.sleep(CHUNK_GAP)             # 串行时保留原有的请求间隔
-    clean_work(os.path.join(WORK, "chunk_%s.wav" % cid))
+    # 顺手收尾：wav 是固定名、下一块会覆盖写，删不掉也无所谓（占用的就是那几个文件）。
+    # 不调 clean_work：它删不掉时会打一行日志，而本机删除保护几乎必然让它失败。
+    for i in range(workers):
+        try:
+            os.remove(os.path.join(WORK, "w%d" % i, "chunk.wav"))
+        except OSError:
+            pass
 
     # 「已唱」浮层峰值：抽取并差分左上角区域，得到歌边界。
     # 拿不到（无浮层 / 缺依赖 / 网络失败）时返回空，detect 自动退化为纯音频流程。
