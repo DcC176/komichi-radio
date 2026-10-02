@@ -53,7 +53,7 @@ FEAT_VERSION = "f1"
 
 # 分段流程的版本标记。改动判据 / 边界算法后必须递增 —— 否则旧缓存会被命中，
 # 重跑拿到的还是旧结果。v2：开始用「已唱」浮层峰值重建歌曲边界。
-CACHE_VERSION = "s3"      # s3：长段按「说话型空档」再切（见 split_by_talk）
+CACHE_VERSION = "s4"      # s4：空档先分「说话/安静」再决定切还是并（见 detect 的 TALK_GAP）
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
@@ -771,6 +771,26 @@ def apply_sung_keys(segs, keys, rows, min_seg=45.0, max_seg=720.0):
     return merged, len(spine)
 
 
+# 「中间的空白到底是把两首歌唱成一段，还是把一首歌切成两段」——全靠这两个数。
+# 报幕/串场（= 真的该切）通常二三十秒起步，歌里的换气/间奏（= 不该切）多在 20 秒内，
+# 所以用长度先筛一道，再问「像不像说话」。
+TALK_GAP = 20.0         # 短于这个的空白一律当换气（主播报幕没这么短）
+TALK_RATIO = 0.5        # 「说话型」秒数占比门槛
+
+
+def talk_ratio(rows, a, b, thr, bthr):
+    """[a,b) 里「像说话」的秒数占比：够响（rms ≥ thr）但没有伴奏（bass < bthr）。
+
+    这正是「主播在讲话」的音频特征：人声响、底鼓贝斯不响。
+    与 tools/seg_lab2.py、tools/boundary_diag.py 用的是同一口径。
+    """
+    seg = [r for r in rows if a <= r["t"] < b]
+    if not seg:
+        return 0.0
+    n = sum(1 for r in seg if r["rms_full"] >= thr and r["bass_ratio"] < bthr)
+    return n / float(len(seg))
+
+
 def detect(rows, min_seg, min_gap, max_seg=720, snap=90, keys=None):
     """两个条件同时满足才算「有内容」：
         ① 整体够响（排除静音与低语）
@@ -812,13 +832,44 @@ def detect(rows, min_seg, min_gap, max_seg=720, snap=90, keys=None):
         else:
             i += 1
 
+    # 合并空档：不是「够不够长」一条线，而是先问这段空白是什么。
+    #   说话型（人声响、没伴奏）= 主播在报幕/串场 → 这里就是歌与歌的分界，
+    #     哪怕只有 20 秒也要切开。原来一律按「短于 min_gap(50s) 就合并」处理，
+    #     于是「唱完一首 → 说两句 → 再唱」被并成一段：唱歌场次里 15% 的段
+    #     超过 8 分钟，主要就是这么来的（实测「几首连成一段」多于「一首被切开」）。
+    #   安静型/很短 = 歌里的换气与间奏 → 合并，切开就是过切。
+    # 注意：拿到「已唱」浮层峰值时，下面的 apply_sung_keys 会以峰值为骨架重建，
+    # 这里多切出来的点只会作为「超长骨架段内部」的兜底，不会盖掉峰值边界。
     merged = []
     for r in runs:
-        if merged and r[0] - merged[-1][1] < min_gap:
-            merged[-1][1] = r[1]
+        if not merged:
+            merged.append(list(r))
+            continue
+        gap_a, gap_b = merged[-1][1], r[0]
+        gap_len = gap_b - gap_a
+        if gap_len >= min_gap:
+            merged.append(list(r))
+            continue
+        if gap_len >= TALK_GAP and talk_ratio(rows, gap_a, gap_b, thr, bthr) >= TALK_RATIO:
+            merged.append(list(r))          # 报幕型空档：切
         else:
-            merged.append(r)
-    kept = [r for r in merged if r[1] - r[0] >= min_seg]
+            merged[-1][1] = r[1]            # 换气/间奏：并
+
+    # 太短的 run 不能直接扔 —— 扔掉就是「这段音频在频道里彻底消失」。
+    # 实测（72 个分P 离线重算）：切细之后有些场次的覆盖率从 77% 掉到 45%，
+    # 就是被这条过滤吃掉的。改成并回相邻段：宁可多带几秒，也不能整段没声。
+    kept = []
+    pend = None                             # 只在最开头可能攒下的一小截
+    for r in merged:
+        if r[1] - r[0] >= min_seg:
+            kept.append([pend[0], r[1]] if pend is not None else r)
+            pend = None
+        elif kept:
+            kept[-1][1] = r[1]
+        else:
+            pend = r if pend is None else [pend[0], r[1]]
+    if pend is not None:
+        kept.append(pend)                   # 整场都很短（纯说话 / 短回放）：照收
 
     changed = 0
     if snap > 0:
