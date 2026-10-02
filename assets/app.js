@@ -350,6 +350,7 @@
     wantPos: null,                          // 本次加载期望的频道位置（视频就绪前的回退）
     offline: false,                         // 本机服务不可用
     retried: {},                            // 已重试过的单元，避免出错循环
+    dashRetried: {},                        // 已「干净重建过一次」的 DASH key（见 fail）
     // 标注：编辑中的分段副本与「改过没」标记（保存成功才写回 window.SEGMENTS）。
     // pendingStart 是「按了 M 记下起点、还没记终点」的那一次。
     segDraft: {}, segDirty: {}, pendingStart: null
@@ -672,6 +673,7 @@
     state.loadingKey = key;
     state.loading = true;
     state.loadingAt = Date.now();
+    delete state.dashRetried[key];          // 新一轮加载：重试额度重置（按 key 记会永久生效）
 
     var total = state.cycle.total;
     var base = (anchor === undefined || anchor === null)
@@ -703,42 +705,64 @@
       el.player.play().catch(function () { /* 浏览器可能要求手势 */ });
       state.loading = false;
     }
-    function fallback() {
+
+    /* 失败分两级：先**干净重建重试一次**，仍失败才降级到 MP4。
+       原来一次失败就直接降级，代价很不对称 —— 一次偶发（实例与元素抢用、
+       单个分片超时、首屏自动起播正被用户点击打断）就让这一期永久停在 720P，
+       而重建一次的代价只有几百毫秒。
+       错误码一并写进提示：它是区分「偶发」与「确定性拒绝」的唯一线索。 */
+    function fail(code) {
+      if (!state.dashRetried[key]) {
+        state.dashRetried[key] = 1;
+        destroyDash();
+        setTimeout(function () {
+          if (state.loadingKey !== key) return;   // 这期间用户已经换了别的
+          start();
+        }, 150);
+        return;
+      }
       state.loading = false;
-      el.npMeta.textContent = 'DASH 不可用，已退回 MP4 通道（最高 720P）';
+      el.npMeta.textContent = 'DASH 不可用' + (code ? '（code ' + code + '）' : '')
+        + '，已退回 MP4 通道（最高 720P）';
+      // 出错的实例必须销毁：它仍 attach 在 <video> 上，
+      // 会和紧接着设上的 MP4 src 抢同一个元素（残余的 appendBuffer 会打乱原生播放）。
+      destroyDash();
       loadMediaMp4(seg, seekTo, base);
     }
 
-    dashPlayer = dashjs.MediaPlayer().create();
-    // 只留这个版本真正认得的项：stableBufferTime（v3 的名字）在本包的 dash.js 里
-    // 已不存在，dash.js 会每次创建播放器都打一条 console.error 并忽略它。
-    // 缓冲区目标不在这里改 —— 当前 v4 默认（长片 60 秒）比原先写的 12 秒更抗网络抖动。
-    dashPlayer.updateSettings({
-      debug: { logLevel: dashjs.Debug.LOG_LEVEL_NONE },
-      streaming: { buffer: { fastSwitchEnabled: false } }
-      // 试过把 abr.initialBitrate 设成最低档来「快速起播」：档位确实降下来了
-      // （视频尺寸先 640x360 再升到 1920x1080），但 playing 反而从 389ms 拖到 722ms ——
-      // dash.js 起播后立刻升档，把出画时间推后了。实测有害，故不设。
-      // 服务端 mpd 里仍然写整条阶梯：它的价值在**网络变差时 ABR 能降档**，而不是起播。
-    });
-    // 回调要认实例：被销毁的旧实例也会把这两个事件抛出来，
-    // 光比 loadingKey 挡不住「连续点两次、key 恰好相同」的情况。
-    var mine = dashPlayer;
-    var stale = function () { return state.loadingKey !== key || dashPlayer !== mine; };
-    dashPlayer.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, function () {
-      if (stale()) return;
-      ok();
-    });
-    dashPlayer.on(dashjs.MediaPlayer.events.ERROR, function () {
-      if (stale()) return;
-      fallback();
-    });
-    try {
-      dashPlayer.initialize(el.player, mpd, false);
-    } catch (e) {
-      fallback();
-      return;
+    function start() {
+      dashPlayer = dashjs.MediaPlayer().create();
+      // 只留这个版本真正认得的项：stableBufferTime（v3 的名字）在本包的 dash.js 里
+      // 已不存在，dash.js 会每次创建播放器都打一条 console.error 并忽略它。
+      // 缓冲区目标不在这里改 —— 当前 v4 默认（长片 60 秒）比原先写的 12 秒更抗网络抖动。
+      dashPlayer.updateSettings({
+        debug: { logLevel: dashjs.Debug.LOG_LEVEL_NONE },
+        streaming: { buffer: { fastSwitchEnabled: false } }
+        // 试过把 abr.initialBitrate 设成最低档来「快速起播」：档位确实降下来了
+        // （视频尺寸先 640x360 再升到 1920x1080），但 playing 反而从 389ms 拖到 722ms ——
+        // dash.js 起播后立刻升档，把出画时间推后了。实测有害，故不设。
+        // 服务端 mpd 里仍然写整条阶梯：它的价值在**网络变差时 ABR 能降档**，而不是起播。
+      });
+      // 回调要认实例：被销毁的旧实例也会把这两个事件抛出来，
+      // 光比 loadingKey 挡不住「连续点两次、key 恰好相同」的情况。
+      var mine = dashPlayer;
+      var stale = function () { return state.loadingKey !== key || dashPlayer !== mine; };
+      dashPlayer.on(dashjs.MediaPlayer.events.STREAM_INITIALIZED, function () {
+        if (stale()) return;
+        ok();
+      });
+      dashPlayer.on(dashjs.MediaPlayer.events.ERROR, function (e) {
+        if (stale()) return;
+        fail(e && e.error ? e.error.code : 0);
+      });
+      try {
+        dashPlayer.initialize(el.player, mpd, false);
+      } catch (e) {
+        fail(0);
+      }
     }
+
+    start();
     setTimeout(function () { if (state.loadingKey === key) state.loading = false; }, 15000);
   }
 
