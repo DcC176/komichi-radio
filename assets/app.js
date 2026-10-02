@@ -346,6 +346,7 @@
     cycleBase: 0,                           // 锚点对应的频道位置
     loadingKey: '',                         // 防止过期的取址结果覆盖新播放
     loading: false,                         // 取流/定位中
+    loadingAt: 0,                           // 本次加载开始时刻（用来兜底解除卡住的 loading）
     wantPos: null,                          // 本次加载期望的频道位置（视频就绪前的回退）
     offline: false,                         // 本机服务不可用
     retried: {},                            // 已重试过的单元，避免出错循环
@@ -573,6 +574,7 @@
     var key = seg.bvid + '#' + seg.page + '#' + state.qn;
     state.loadingKey = key;
     state.loading = true;
+    state.loadingAt = Date.now();
     fetch('/api/playurl?bvid=' + encodeURIComponent(seg.bvid)
           + '&cid=' + seg.cid + '&qn=' + state.qn)
       .then(function (r) { return r.json(); })
@@ -638,11 +640,9 @@
       try { dashPlayer.destroy(); } catch (e) { /* v4 才有，没有就算了 */ }
       dashPlayer = null;
     }
-    // 旧的 MediaSource 挂在元素上时，新实例的 attachSource 会失败
-    try {
-      el.player.removeAttribute('src');
-      el.player.load();
-    } catch (e) { /* 忽略 */ }
+    // 这里**不要**再 removeAttribute('src') + load()：dash.js 的
+    // detachMediaElement() 自己就会清掉旧 MediaSource，我们再插一手 load()
+    // 会与紧随其后的 attachSource 抢同一个元素 —— 表现就是「概率性地 DASH 不可用」。
   }
 
   // 播放：优先 DASH（1080P 只存在于 DASH 通道），失败再退回 MP4。
@@ -664,11 +664,14 @@
   function loadMedia(seg, seekTo, anchor) {
     if (state.offline) return;
     var key = seg.bvid + '#' + seg.page + '#' + state.qn;
-    // 同一期已经在加载了就别推倒重来 —— 用户「点了没反应，再点一次」很常见，
+    // 同一期刚开始加载就别推倒重来 —— 用户「点了没反应，再点一次」很常见，
     // 而重建一次 dash.js 既慢又容易失败（见 destroyDash 里的注释）。
-    if (state.loadingKey === key && state.loading && dashPlayer) return;
+    // 但只挡 2.5 秒：再久还卡着说明那一次没成，得让用户能重试。
+    if (state.loadingKey === key && state.loading && dashPlayer
+        && (Date.now() - (state.loadingAt || 0)) < 2500) return;
     state.loadingKey = key;
     state.loading = true;
+    state.loadingAt = Date.now();
 
     var total = state.cycle.total;
     var base = (anchor === undefined || anchor === null)
@@ -3295,6 +3298,18 @@
     return -1;
   }
 
+  /* 清单还没到位时用户就点了播放（首屏刚打开最常见）：以前是静默 return ——
+     用户看到的就是「点了没反应」。这里记下来，等清单填好自动接着播。 */
+  var pendingPlay = null;
+
+  function runPendingPlay() {
+    if (!pendingPlay) return;
+    var p = pendingPlay;
+    pendingPlay = null;
+    if (Date.now() - p.at > 15000) return;    // 太久了，别拿旧点击去打断用户当下的操作
+    playProgram(p.bvid);
+  }
+
   function playProgram(bvid) {
     ensureInCycle(bvid);
     /* 清单刷新过、而循环还是旧的（新一期只在 state.all 里）时，这里会找不到它 ——
@@ -3306,6 +3321,12 @@
       rebuildCycle(true);
       state.cycleStale = false;   // 已经套用了新清单，别再让 tick 重建一次
     }
+    if (findSegIndex(bvid) < 0) {
+      pendingPlay = { bvid: bvid, at: Date.now() };   // 等清单到位再播，别静默失败
+      el.npMeta.textContent = '清单还在载入，稍后自动开始播放…';
+      return;
+    }
+    pendingPlay = null;
     var segs = state.cycle.segments;
     for (var i = 0; i < segs.length; i++) {
       if (segs[i].bvid === bvid) {
@@ -3689,7 +3710,17 @@
   function tick() {
     if (!state.cycle || !state.cycle.segments.length) return;
     if (state.view === 'broadcast') return;   // 直播流占着播放器，回放的换段逻辑别来抢
-    if (state.loading) return;              // 取流/定位期间不做换段判断
+    if (state.loading) {
+      // 取流/定位期间不做换段判断。但**不能无限等**：dash 与 mp4 各自的兜底
+      // 最长 15 秒，真遇上回调没回来，卡住的不只是换段 —— 用户再点同一期
+      // 会被「正在加载」挡掉，表现就是「点了没反应」。
+      if (state.loadingAt && Date.now() - state.loadingAt > 20000) {
+        state.loading = false;
+        state.loadingAt = 0;
+      } else {
+        return;
+      }
+    }
     var pos = cyclePos();
     var i = findSeg(pos);
     if (i !== state.segIndex) {
@@ -3766,6 +3797,7 @@
     renderList();
     syncSound();
     syncSkip();
+    runPendingPlay();          // 用户刚才可能在清单到位之前就点了播放
 
     var h = parseInt(state.horizon, 10);
     document.querySelectorAll('[data-horizon]').forEach(function (x) {
@@ -4114,6 +4146,7 @@
       state.cycleStale = true;
       renderChips();
       renderList();
+      runPendingPlay();
       return true;
     }
 
