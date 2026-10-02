@@ -2260,16 +2260,23 @@ def _seg_state():
 def _seg_auto_on(st):
     """这位主播开没开自动分段。
 
-    **没有状态文件 = 还没见过这位主播 → 默认开**。原来空字典被当成「关」，
-    结果副站（从来没有各自的 seg_state.json，那份只在主站目录下）的自动分段
-    形同虚设：清单抓了 30~75 期，分段数据始终 0，界面还一句提示都没有。
-    只有用户显式关过（文件里 auto=false）才算关 —— 所以判据是「有没有 auto 这个键」，
-    不是「auto 的值是真是假」：状态文件也会由扫描自己创建（那时还没记 auto），
-    只看值的话第二次扫描就把它当成「用户关了」。
+    判据有两层，必须都过：
+
+    1. **没有状态文件 = 还没见过这位主播 → 默认开**。空字典被当成「关」是错的，
+       副站（从来没有各自的 seg_state.json）的自动分段会形同虚设：清单抓了几十期，
+       分段数据始终 0，界面还一句提示都没有。
+    2. **`auto=false` 只有配上 `auto_user` 才算「用户显式关过」**。原来只看 `auto` 的值，
+       于是任何写过一次 `auto=False` 的路径（界面被脚本/批量操作触发、旧版本残留状态）
+       都会把这位主播**永久**锁在关闭态 —— 实测三个副站全中，共 163 个分P 再也不补。
+       现在把「用户关」与「程序写过的默认值」分开：只有 `auto_user` 为真时 `auto=false` 才生效。
     """
-    if not st or "auto" not in st:
+    if not st:
         return True
-    return bool(st["auto"])
+    if "auto" not in st:
+        return True                    # 扫描自建的文件，还没记过 → 默认开
+    if st.get("auto_user"):
+        return bool(st["auto"])        # 用户在界面上显式设过，尊重它
+    return True                        # 没有用户意图标记 → 文件里的值不作数，默认开
 
 
 def _seg_save_state(st):
@@ -2500,7 +2507,7 @@ def segments_autoscan(programs):
     if not st.get("seen_upto"):
         st["seen_upto"] = max([p.get("pubdate") or 0 for p in programs] or [0])
         st["checked_at"] = int(time.time())
-        st.setdefault("auto", True)            # 顺手把「默认开」落成显式记录
+        st["auto"] = st.get("auto", True)      # 顺手把「默认开」落成显式记录
         _seg_save_state(st)
         return                                 # 首次开启：只设水位线，不回头翻历史
     have = segments_have()
@@ -2630,6 +2637,10 @@ def api_segments_status():
 def api_segments_auto(on):
     st = _seg_state()
     st["auto"] = bool(on)
+    # 用户意图标记：只有这里（用户真点了开关）才写。
+    # _seg_auto_on 靠它区分「用户关的」与「程序写过的默认值 / 旧版本残留」——
+    # 没有它的话，任何一次把 auto 写成 false 的路径都会把这位主播永久锁死。
+    st["auto_user"] = True
     if on and not st.get("seen_upto"):
         # 开启时先立水位线：只对「从现在起」出现的新回放自动分段
         st["seen_upto"] = int(time.time())
