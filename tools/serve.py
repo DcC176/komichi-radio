@@ -559,6 +559,8 @@ def probe_mid(mid):
         err = str(e)
     return {"mid": mid, "name": str(info.get("uname") or "").strip(),
             "room": str(info.get("room_id") or ""),
+            # 头像：页面拿它自动挑一个板块色（图片经 /api/img 代理，同源，canvas 能读像素）
+            "face": str(info.get("face") or "").strip(),
             "living": int(info.get("live_status") or 0) == 1,
             "sources": cands, "suggested": suggested, "error": err}
 
@@ -617,7 +619,9 @@ def api_stations_save(obj):
         cur = {"id": sid, "mid": mid, "main": False,
                "name": base_name, "short": base_name[:6], "room": p["room"]}
         items.append(cur)
-    cur["id"] = sid
+    # 更新时**不能**拿 sid 覆盖 id：id 同时是数据目录名（data/<id>/），改掉就对不上了。
+    # 而「检测 → 保存」这条路径前端不带 id，sid 会退化成 mid —— 于是 id 被悄悄改成
+    # 一串数字（实测踩过：komichi 变成 1512246445）。新增时才设 id，更新一律保留。
     cur["mid"] = mid
     cur.update(fields)
     if not cur.get("name"):
@@ -2424,32 +2428,45 @@ def segments_enqueue(bvid, program=None):
     return True
 
 
+SEG_BATCH_MAX = 3      # 单次扫描最多补几期，免得一开就排几十场
+
+
 def segments_autoscan(programs):
-    """新回放自动排队。只认「水位线之后出现」的投稿，历史缺口不自动补。
+    """新回放自动排队。
 
     首次开启时先把水位线设成当前最新的投稿 —— 否则一打开就把几十场老回放全排上。
+
+    之后**按「还有没有缺口」挑，而不是按水位线挑**。原来写的是
+    `pubdate > seen_upto`，而 seen_upto 记的正是「上次扫描时的最新一期」——
+    那一期只要没处理成功（或队列还没轮到就重启了），它就永远不满足 `>`，
+    于是被永久漏掉，表现就是「分段停在那一天」（实测卡在 9-28）。
+    现在只要还有分P 没分段就排队，按时间从旧到新补，单次最多 SEG_BATCH_MAX 期。
     """
     if not _seg_state().get("auto"):
         return
     if seg_ffmpeg() == "":
         return                                 # 没有 ffmpeg，排了也白排
-    have = segments_have()
-    newest = max([p.get("pubdate") or 0 for p in programs] or [0])
     st = _seg_state()
-    mark = st.get("seen_upto") or 0
-    if not mark:
-        st["seen_upto"] = newest
+    if not st.get("seen_upto"):
+        st["seen_upto"] = max([p.get("pubdate") or 0 for p in programs] or [0])
         _seg_save_state(st)
+        return                                 # 首次开启：只设水位线，不回头翻历史
+    have = segments_have()
+    missing = [p for p in programs
+               if (p.get("parts") or [])
+               and any(str(x["cid"]) not in have for x in p["parts"])]
+    if not missing:
+        # 没缺口了才把水位线推到最新 —— 有缺口时留着旧值，界面上的状态才如实
+        newest = max([p.get("pubdate") or 0 for p in programs] or [0])
+        if newest > (st.get("seen_upto") or 0):
+            st["seen_upto"] = newest
+            _seg_save_state(st)
         return
-    fresh = [p for p in programs
-             if (p.get("pubdate") or 0) > mark
-             and any(str(x["cid"]) not in have for x in p["parts"])]
-    if not fresh:
-        return
-    for p in sorted(fresh, key=lambda x: x.get("pubdate") or 0):
+    # 缺口**从新到旧**补：用户在意的是「最近几期怎么没更新」，
+    # 先花几个小时去啃半年前的旧回放显然不是他想看到的。
+    for p in sorted(missing, key=lambda x: x.get("pubdate") or 0,
+                    reverse=True)[:SEG_BATCH_MAX]:
         segments_enqueue(p["bvid"], p)
-    st["seen_upto"] = newest
-    _seg_save_state(st)
 
 
 def _known_parts():
@@ -2552,8 +2569,8 @@ def _find_program(bvid):
 def api_segments_refresh():
     """手动触发：扫一遍清单，把所有还缺分段的分P 所属投稿排队（新回放优先）。
 
-    与 segments_autoscan 的分工：autoscan 只认水位线之后出现的回放（首次开启不排历史，
-    否则一开就排几十场）；这里是用户显式点击，所以历史缺口一起补。
+    与 segments_autoscan 的分工：autoscan 每次最多补 SEG_BATCH_MAX 期（从新到旧），
+    在后台慢慢消化；这里是用户显式点击，所以缺的一次全排上。
     """
     if seg_ffmpeg() == "":
         return 200, {"ok": False, "error": "未找到 ffmpeg，无法分段"}

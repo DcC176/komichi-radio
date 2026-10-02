@@ -26,7 +26,10 @@ import time
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EXE = os.path.join(ROOT, "发布", "二十四时小路电台.exe")
+# 产物名从 build_exe.py 取，避免「带版本号」这件事在两处各写一份而对不上
+sys.path.insert(0, os.path.join(ROOT, "tools"))
+from build_exe import FINAL_NAME          # noqa: E402
+EXE = os.path.join(ROOT, "发布", FINAL_NAME)
 APPDIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
                       "KomichiRadio")
 WWW = os.path.join(APPDIR, "www")

@@ -133,8 +133,13 @@
   }
 
   /* 点亮多个板块时，把它们的主题色混成一个（红 + 黄 → 橙）。
-     逐级线性插值：第 i 个色按 1/(i+1) 的权重并进去，等价于等权平均；
-     和 mixHex 一样走 srgb 线性插值，颜色是可预期的，不会出现意外跳色。 */
+
+     两步：先按 srgb 线性插值做等权平均（逐级进行，第 i 个色权重 1/(i+1)），
+     再把饱和度/亮度**抬进主题色该有的区间**。
+
+     第二步是必须的：几个颜色一平均就容易发灰发暗 —— 实测四个板块平均出来是
+     rgb(198,162,133) 那种土褐色，铺到版面上整片发闷。用户要的是「鲜艳的融合色」，
+     所以最后统一提上去。单个板块时原色照用，不做任何加工。 */
   function mixAccents(ids) {
     var hexes = [];
     (ids || []).forEach(function (id) {
@@ -147,7 +152,13 @@
     for (var i = 1; i < hexes.length; i++) {
       acc = mixHex(acc, hexes[i], 1 / (i + 1)) || acc;   // mixHex 的 t 是「新色的占比」
     }
-    return acc;
+    if (hexes.length < 2) return acc;
+    var hsl = rgbToHsl(parseInt(acc.substr(1, 2), 16),
+                       parseInt(acc.substr(3, 2), 16),
+                       parseInt(acc.substr(5, 2), 16));
+    return hslToHex(hsl[0],
+                    Math.min(0.92, Math.max(0.58, hsl[1])),   // 饱和度不够就补到够鲜艳
+                    Math.min(0.70, Math.max(0.58, hsl[2])));  // 亮度落在「深底上够亮」的区间
   }
 
   /* 底色/卡片底色是否跟着主题走。
@@ -159,6 +170,80 @@
     if (list.length > 1) return true;
     var s = findStation(list[0]);
     return !(s && s.main);
+  }
+
+  function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    var mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    var l = (mx + mn) / 2, h = 0, s = 0;
+    if (mx !== mn) {
+      var d = mx - mn;
+      s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+      if (mx === r) h = (g - b) / d + (g < b ? 6 : 0);
+      else if (mx === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h /= 6;
+    }
+    return [h, s, l];
+  }
+
+  function hslToHex(h, s, l) {
+    function f(p, q, t) {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    }
+    var r, g, b;
+    if (s === 0) { r = g = b = l; }
+    else {
+      var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+      var p = 2 * l - q;
+      r = f(p, q, h + 1 / 3); g = f(p, q, h); b = f(p, q, h - 1 / 3);
+    }
+    return '#' + [r, g, b].map(function (x) {
+      var v = Math.round(x * 255);
+      return (v < 16 ? '0' : '') + v.toString(16);
+    }).join('');
+  }
+
+  /* 从头像里挑一个能当主题色的颜色。
+
+     不能直接取平均 —— 那是灰的。做法：缩到 32×32 读像素，滤掉近黑/近白/灰，
+     再按「饱和度的平方」加权平均（越鲜艳的像素话语权越大）。
+     最后把 S/L 拉进主题色该有的区间 —— 头像原色往往偏暗发脏，
+     不归一化的话灯亮起来就是一块脏色，铺到深色底上更糊。 */
+  function accentFromImage(url) {
+    return new Promise(function (resolve) {
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var n = 32;
+          var cv = document.createElement('canvas');
+          cv.width = cv.height = n;
+          var cx = cv.getContext('2d');
+          cx.drawImage(img, 0, 0, n, n);
+          var d = cx.getImageData(0, 0, n, n).data;
+          var r = 0, g = 0, b = 0, w = 0;
+          for (var i = 0; i < d.length; i += 4) {
+            if (d[i + 3] < 200) continue;                 // 透明像素不算数
+            var hsl = rgbToHsl(d[i], d[i + 1], d[i + 2]);
+            if (hsl[2] < 0.16 || hsl[2] > 0.94 || hsl[1] < 0.22) continue;
+            var k = hsl[1] * hsl[1];
+            r += d[i] * k; g += d[i + 1] * k; b += d[i + 2] * k; w += k;
+          }
+          if (!w) { resolve(''); return; }
+          var m = rgbToHsl(r / w, g / w, b / w);
+          resolve(hslToHex(m[0],
+                           Math.min(0.9, Math.max(0.55, m[1])),
+                           Math.min(0.72, Math.max(0.52, m[2]))));
+        } catch (e) { resolve(''); }
+      };
+      img.onerror = function () { resolve(''); };
+      img.src = url;                                      // 走 /api/img：同源，canvas 读得到像素
+    });
   }
 
   function themeSweep(hex, x, y) {
@@ -1454,6 +1539,22 @@
         var b = e.target && e.target.closest ? e.target.closest('[data-st-del]') : null;
         if (b) deleteStation(b.getAttribute('data-st-del'));
       });
+      // 行首色点就是颜色盘：改完直接存，不用再去点保存
+      stList.addEventListener('change', function (e) {
+        var c = e.target;
+        if (c && c.getAttribute && c.getAttribute('data-st-color')) {
+          saveStationColor(c.getAttribute('data-st-color'),
+                           c.getAttribute('data-st-mid'), c.value);
+        }
+      });
+    }
+
+    var autoBtn = document.getElementById('st-accent-auto');
+    if (autoBtn) {
+      autoBtn.addEventListener('click', function () {
+        if (stProbe && stProbe.face) stAccentAuto(stProbe.face);
+        else stTip('先点「检测」，拿到头像之后才能取色');
+      });
     }
 
     // 自动分段：开关 + 手动给最新一期排队，状态轮询在 renderSettings 里起
@@ -1651,13 +1752,21 @@
       if (s.mid) meta.push('UID ' + s.mid);
       if (s.room) meta.push('房间 ' + s.room);
       meta.push(s.series_id ? ('系列 ' + s.series_id + '（手填）') : '来源自动发现');
-      return '<div class="key-row">'
-        + '<span class="key-name" style="border-left:3px solid '
-        + esc(s.accent || '#8a8a95') + ';padding-left:8px">'
-        + esc(s.short || s.name || s.id) + (s.main ? ' <b>（主站）</b>' : '') + '</span>'
-        + '<span class="key-scope">' + esc(meta.join(' · ')) + '</span>'
+      /* 名与元信息分两行 —— 原来挤在一行时，UID/房间号那串没有宽度约束，
+         会把主播名压到几乎看不见（自定义 UID 变长后更明显）。
+         行首那个圆点本身就是 <input type="color">，点一下就能改这位的板块色。 */
+      return '<div class="st-row">'
+        + '<input type="color" class="st-dot" data-st-color="' + esc(s.id) + '"'
+        + ' data-st-mid="' + esc(s.mid || '') + '"'
+        + ' value="' + esc(themeHex(s.accent) || '#8a8a95') + '"'
+        + ' title="点这里改「' + esc(s.short || s.name || s.id) + '」的板块颜色">'
+        + '<div class="st-row-main">'
+        + '<div class="st-row-name">' + esc(s.short || s.name || s.id)
+        + (s.main ? ' <b>（主站）</b>' : '') + '</div>'
+        + '<div class="st-row-meta">' + esc(meta.join(' · ')) + '</div>'
+        + '</div>'
         + (s.main ? '' : '<button class="key-del" type="button" title="删除"'
-           + ' style="margin-left:auto" data-st-del="' + esc(s.id) + '">×</button>')
+           + ' data-st-del="' + esc(s.id) + '">×</button>')
         + '</div>';
     }).join('');
   }
@@ -1668,7 +1777,44 @@
       renderLamps();
       renderMixedNote();
       renderStationsCard();
+      // 颜色可能刚被改过 —— 立刻重算主题，不用等下次重载才看到
+      var cur = findStation(ST);
+      if (cur) {
+        ST_TINT = stationTint(ST_SET);
+        applyTheme(mixAccents(ST_SET) || cur.accent);
+      }
     });
+  }
+
+  /* 按头像自动挑一个板块色。图片必须走 /api/img 代理 —— 直连 hdslb 是跨域，
+     canvas 读不出像素（会抛 SecurityError）。 */
+  function stAccentAuto(face) {
+    var input = document.getElementById('st-accent');
+    var note = document.getElementById('st-accent-note');
+    if (!input) return;
+    if (note) { note.hidden = false; note.textContent = '正在按头像取色…'; }
+    accentFromImage('/api/img?u=' + b64url(face)).then(function (hex) {
+      if (!input) return;
+      if (hex) {
+        input.value = hex;
+        if (note) note.textContent = '已按头像取色 ' + hex + '（不满意可以自己调）。';
+      } else if (note) {
+        note.textContent = '头像里没挑到合适的颜色，手动选一个吧。';
+      }
+    });
+  }
+
+  /* 改一位已有主播的板块色。复用同一个 save 接口（它按 id/mid 更新），
+     所以后端不用新增东西。mid 是必填 —— 接口用它验身份。 */
+  function saveStationColor(id, mid, hex) {
+    if (!id || !mid || !hex) return;
+    postJSON('/api/stations/save', { mid: mid, id: id, accent: hex })
+      .then(function (d) {
+        if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
+        stTip('「' + esc(id) + '」的板块颜色已更新 ✓');
+        stRefreshUI();
+      })
+      .catch(function () { stTip('改色失败，请重试'); });
   }
 
   function probeStation() {
@@ -1680,10 +1826,14 @@
     var mid = (input.value || '').trim();
     if (!mid) { stTip('先填主播 UID'); return; }
     stTip('正在检测…');
+    var colorBox = document.getElementById('st-color-box');
+    var accentNote = document.getElementById('st-accent-note');
     stProbe = null;
     if (box) box.hidden = true;
     if (note) note.hidden = true;
     if (save) save.hidden = true;
+    if (colorBox) colorBox.hidden = true;
+    if (accentNote) accentNote.hidden = true;
     postJSON('/api/stations/probe', { mid: mid })
       .then(function (d) {
         if (d.error) { stTip('<b>' + esc(d.error) + '</b>'); return; }
@@ -1704,6 +1854,8 @@
               + '加进来也能用，但回放清单会是空的（只有合集不行，归档接口只认系列）。';
           }
         }
+        if (colorBox) colorBox.hidden = false;
+        if (stProbe && stProbe.face) stAccentAuto(stProbe.face);   // 自动按头像配色
         stTip('查到 <b>' + esc((stProbe && stProbe.name) || ('UID ' + mid))
           + '</b>' + ((stProbe && stProbe.room) ? '，房间号 ' + esc(stProbe.room) : '')
           + '，确认无误就点保存。');
@@ -1716,12 +1868,20 @@
     var mid = (document.getElementById('st-mid').value || '').trim();
     if (!mid) { stTip('先填主播 UID'); return; }
     var body = { mid: mid };
+    // 这位已经在列表里就带上它的 id：明确是「更新这一位」。
+    // 不带的话服务端会把 id 退化成 mid，而 id 同时是数据目录名 —— 对不上。
+    var exist = (STATIONS || []).filter(function (s) {
+      return String(s.mid) === mid;
+    })[0];
+    if (exist) body.id = exist.id;
     if (stProbe) {
       if (stProbe.name) body.name = stProbe.name;
       if (stProbe.room) body.room = stProbe.room;
     }
     var sid = (sel.value || '').trim();
     if (sid) body.series_id = sid;      // 留空 = 自动发现（v2 语义）
+    var acc = document.getElementById('st-accent');
+    if (acc && acc.value) body.accent = acc.value;   // 检测时自动取的，用户改过就用改过的
     stTip('正在保存…');
     postJSON('/api/stations/save', body)
       .then(function (d) {
@@ -1888,7 +2048,7 @@
   // 因为用户在这一行只想问「数据是新的吗」。
   // 时间取持久化记录（seg_state.json），不用 segments.js 的 mtime：
   // 每次启动/换版本都会重写那个文件，mtime 会变成「刚刚」，等于撒谎。
-  function segWhenText(d) {
+  function segWhenText(d, cov) {
     var queue = (d.queue || []).length;
     if (d.running || queue) {
       return '正在更新：还有 ' + (queue + (d.running ? 1 : 0)) + ' 个投稿排队'
@@ -1903,6 +2063,14 @@
       ? hhmm(g)
       : (g.getMonth() + 1) + '-' + pad2(g.getDate()) + ' ' + hhmm(g);
     if (!last.ok) return '上次更新失败（' + stamp + '）：' + (last.error || '未知错误');
+    /* 「上次更新」说的是**最后一次真正干活**的时间，没有待补的分P 时它会一直停在旧日期 ——
+       看起来就像「数据停在那天不动了」。实测用户就是这么误判的（报了「分段停在 9-29」，
+       其实数据是全的，只是 last 还停在 9-29 那一次）。所以先看有没有缺口：
+       分P 全分完了就直接说「已是最新」，把旧日期放到括号里当参考。 */
+    var total = (cov || {}).total || 0, have = (cov || {}).have || 0;
+    if (total && have >= total) {
+      return '已是最新：' + have + ' 个分P 全部分好段（上次更新 ' + stamp + '）';
+    }
     return '上次更新：' + stamp + ' · 新算 ' + (last.processed || 0) + ' 个分P'
       + (last.title ? ' · ' + last.title : '');
   }
@@ -1913,7 +2081,7 @@
       + (total ? '（' + Math.round(have * 100 / total) + '%）' : '')
       + ' · ' + fmtNum(cov.segments || 0) + ' 段';
     el.segBtn.disabled = segBusy || !d.ffmpeg;
-    el.segWhen.textContent = segWhenText(d);
+    el.segWhen.textContent = segWhenText(d, cov);
     segProgress(d);
   }
 

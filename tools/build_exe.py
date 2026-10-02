@@ -29,8 +29,12 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "发布")
 BUILD = os.path.join(ROOT, "build")
 
+APP_VERSION = "1.4.0"                     # 程序版本号，每版递增
 PYI_NAME = "KomichiRadio"                 # PyInstaller 内部用名（ASCII）
-FINAL_NAME = "二十四时小路电台.exe"        # 给用户的文件名
+# 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
+# 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
+# 所以改名不影响单实例检测与 --stop。
+FINAL_NAME = "二十四时小路电台-v%s.exe" % APP_VERSION
 WEB = ["index.html", "favicon.ico", "assets", "data"]   # 网页文件，释放到 www\
 README_SRC = "readme.txt"                 # 使用说明，释放到用户目录根
 
@@ -38,12 +42,12 @@ README = """二十四时小路电台 · 使用说明
 ========================================
 
 【怎么用】
-双击「二十四时小路电台.exe」。它会自动打开浏览器并开始播放。
+双击「{{NAME}}」。它会自动打开浏览器并开始播放。
 之后想再看，直接开浏览器访问 http://127.0.0.1:8765/ 就行。
 
 【怎么关】
 在播放页面右下角点「停止本地服务」。
-也可以在任务管理器里结束「二十四时小路电台.exe」。
+也可以在任务管理器里结束「{{NAME}}」。
 
 【注意】
 1. 只需要这一个 EXE，不用额外拷任何文件。
@@ -56,7 +60,9 @@ README = """二十四时小路电台 · 使用说明
 4. 出问题看日志：%LOCALAPPDATA%\\KomichiRadio\\log.txt
 5. 如果 8765 端口被别的程序占用，会自动顺延到 8766、8767……
    实际地址看日志。
-"""
+"""                                 # 下面再替换文件名：说明里有 %LOCALAPPDATA%，
+                                    # 走 % 格式化会把它当成占位符报错，所以用 replace
+README = README.replace("{{NAME}}", FINAL_NAME)
 
 
 def ensure_pyinstaller():

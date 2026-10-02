@@ -1831,6 +1831,66 @@ body.view-broadcast #live-send-card { flex: 0 0 auto; }
 
 /* ---------------- 设置页：快捷键绑定（默认全部留空，用户自己按） */
 .key-list { display: flex; flex-direction: column; }
+/* ---- 主播列表（设置页）----
+   名与元信息分两行：挤在一行时，UID/房间号那串没有宽度约束，
+   会把主播名压得几乎看不见 —— 自定义 UID 位数变长后尤其明显。 */
+.st-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+}
+.st-row:last-child { border-bottom: 0; }
+.st-row-main { flex: 1; min-width: 0; }
+.st-row-name {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.st-row-meta {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted-2);
+  overflow-wrap: anywhere;      /* 长数字串得能断行，不能把容器撑破 */
+}
+
+/* 行首那个圆点本身就是颜色盘：点开就是系统取色器，改完即存。
+   注意**不要**写 -webkit-appearance: none —— 那会让 Chrome 干脆不画 swatch，
+   圆点变成一块空白（实测踩过）。只定制 swatch 的圆角就够了。 */
+/* 选择器要带上 .st-row 才有足够特异性：上面 `.live-card input { flex: 1 }` 会一并
+   命中这里，把色点从 22px 撑成整行宽（425px，实测）。同一个坑 1943 行给复选框
+   写过一次注释 —— 这次又踩了，所以这里把选择器写严一点。 */
+.st-row input.st-dot {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 50%;
+  background: none;
+  cursor: pointer;
+}
+.st-row input.st-dot::-webkit-color-swatch-wrapper { padding: 0; }
+.st-row input.st-dot::-webkit-color-swatch { border: none; border-radius: 50%; }
+.st-row input.st-dot::-moz-color-swatch { border: none; border-radius: 50%; }
+.st-row input.st-dot:hover { border-color: var(--muted); }
+
+.st-color-wrap { display: flex; align-items: center; gap: 10px; }
+/* flex: none 同上 —— 不写的话 `.live-card input { flex: 1 }` 会把它拉长 */
+#st-accent {
+  flex: none;
+  width: 42px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+}
+
 .key-row {
   display: flex;
   align-items: center;
