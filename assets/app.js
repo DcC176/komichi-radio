@@ -2314,6 +2314,24 @@
     }, Math.max(0, 260 - (Date.now() - at)));
   }
 
+  /* 首屏加载动画的收尾（DOM 与样式内联在 index.html，这里只负责撤）。
+     同样留一个最短停留 —— 本地首屏常常几十毫秒就渲染完了，
+     不设下限动画会「闪一下」，比没有还晃眼。 */
+  var bootVeilTimer = null, bootVeilKill = null;
+  function hideBootVeil() {
+    var v = document.getElementById('boot-veil');
+    if (!v || v.classList.contains('gone')) return;
+    var t0 = window.__BOOT_T0 || 0;
+    clearTimeout(bootVeilTimer);
+    clearTimeout(bootVeilKill);
+    bootVeilTimer = setTimeout(function () {
+      v.classList.add('gone');
+      bootVeilKill = setTimeout(function () {
+        if (v.parentNode) v.parentNode.removeChild(v);
+      }, 420);
+    }, Math.max(0, 520 - (Date.now() - t0)));
+  }
+
   /* 让当前视图播一次入场动画（淡入 + 轻微上移，220ms）。
      dir: 1 = 从右边进（往右点的标签），-1 = 从左边进，0 = 只淡入（首屏）。
      remove 之后再读一次 offsetWidth 是必需的 —— 同一帧内 remove+add 会被浏览器
@@ -3835,6 +3853,7 @@
     if (!viewEntered) enterView(0);      // 首屏没有「前后」可言，只淡入
     moveTabPill(true);                   // 胶囊首次就位（不带过渡）
     finishSwitchVeil();                  // 若是「切板块」过来的，撤掉过渡遮罩
+    hideBootVeil();                      // 内容已经就位，收掉加载动画
     prefetchOthers();                     // 空闲预热其它板块（切过去就不用现抓）
     if (store.get('xl_lang') === 'zh-Hant') setLang('zh-Hant', true);
     checkServer().then(function () {
@@ -3854,6 +3873,7 @@
   }
 
   function fail(err) {
+    hideBootVeil();                      // 出错也要收掉，不能让动画一直盖着错误提示
     el.rows.innerHTML = emptyRow(5, '未找到节目单数据。请先运行：<br><br>'
       + '<code>python tools/collect.py</code>');
     el.npTitle.textContent = '无数据';
@@ -4212,6 +4232,7 @@
               // 而不是丢一句让人自己去改配置
               explainNoPrograms().then(function (msg) { tip.textContent = msg; });
             }
+            hideBootVeil();              // 明确停在「这位还没有回放数据」上，别让动画挡着
             return;
           }
           var r = boot(d);

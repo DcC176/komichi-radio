@@ -11,7 +11,16 @@
    所以在文档**最早的时机**铺上目标板块的底色把它盖住：旧页面先过渡到这个色，
    重载期间同色延续，新内容就绪后再淡入。用户看到的是「颜色过渡 + 停留」，不是闪一下。
    这一小段必须内联：等 style.css / app.js 到位就太晚了。 */
+window.__BOOT_T0 = Date.now();
 (function () {
+  /* 加载动画的硬兜底：万一 app.js 报错、或清单一直不来，也不能让页面永久蒙着。
+     正常路径由 app.js 的 hideBootVeil() 在数据渲染完后撤掉。 */
+  setTimeout(function () {
+    var b = document.getElementById('boot-veil');
+    if (!b || b.classList.contains('gone')) return;
+    b.classList.add('gone');
+    setTimeout(function () { if (b.parentNode) b.parentNode.removeChild(b); }, 420);
+  }, 8000);
   try {
     var v = sessionStorage.getItem('xl_veil');
     if (!v) return;
@@ -34,13 +43,86 @@
 })();
 </script>
 <style>
-  /* 盖住重载空窗：html 铺底色，body 先不显示（用 opacity 以便淡入而不是硬切） */
+  /* 盖住重载空窗：html 铺底色，内容先不显示（用 opacity 以便淡入而不是硬切）。
+     排除 #boot-veil —— 父级 opacity 会把它一起带走，那样切板块时只剩一块纯色。 */
   html.switching { background: var(--bg, #08080a); }
-  html.switching body { opacity: 0; }
-  body { transition: opacity .18s ease-out; }
+  html.switching body > *:not(#boot-veil) { opacity: 0; }
+  body > *:not(#boot-veil) { transition: opacity .18s ease-out; }
+
+  /* 首屏加载动画。必须内联：等 style.css / app.js 到位就太晚了，
+     那时用户已经先看到了空列表，再出现动画等于没有动画。 */
+  #boot-veil {
+    position: fixed; inset: 0; z-index: 1000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 22px;
+    background: var(--bg, #08080a);
+    color: #e9e9ee; user-select: none;
+    font: 400 14px/1.7 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    transition: opacity .4s ease-out, visibility .4s;
+  }
+  #boot-veil.gone { opacity: 0; visibility: hidden; pointer-events: none; }
+
+  /* 中间那颗「直播中」的红点 + 两圈错开的扩散波 */
+  .bv-pulse { position: relative; width: 78px; height: 78px; display: grid; place-items: center; }
+  .bv-dot {
+    width: 15px; height: 15px; border-radius: 50%;
+    background: var(--red, #ff3b4e);
+    box-shadow: 0 0 24px color-mix(in srgb, var(--red, #ff3b4e) 55%, transparent);
+    animation: bvBeat 1.5s ease-in-out infinite;
+  }
+  .bv-ring {
+    position: absolute; inset: 0; border-radius: 50%; opacity: 0;
+    border: 1.5px solid var(--red, #ff3b4e);
+    animation: bvRing 2.6s ease-out infinite;
+  }
+  .bv-ring + .bv-ring { animation-delay: 1.3s; }
+  @keyframes bvBeat { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.3); } }
+  @keyframes bvRing { 0% { transform: scale(.34); opacity: .5; } 100% { transform: scale(1.1); opacity: 0; } }
+
+  /* 声波柱：节奏错开，看起来像在收声而不是整体呼吸 */
+  .bv-bars { display: flex; align-items: flex-end; gap: 6px; height: 24px; }
+  .bv-bars i {
+    width: 4px; height: 100%; border-radius: 2px; opacity: .8;
+    background: var(--red, #ff3b4e);
+    transform-origin: 50% 100%;
+    animation: bvBar 1.05s ease-in-out infinite;
+  }
+  .bv-bars i:nth-child(2) { animation-duration: .85s;  animation-delay: -.3s; }
+  .bv-bars i:nth-child(3) { animation-duration: 1.25s; animation-delay: -.6s; }
+  .bv-bars i:nth-child(4) { animation-duration: .95s;  animation-delay: -.15s; }
+  .bv-bars i:nth-child(5) { animation-duration: 1.15s; animation-delay: -.45s; }
+  @keyframes bvBar { 0%, 100% { transform: scaleY(.26); } 50% { transform: scaleY(1); } }
+
+  .bv-text { font-size: 13px; letter-spacing: .18em; opacity: .8; }
+  .bv-brand { margin-top: -10px; font-size: 11px; letter-spacing: .34em; opacity: .36; }
+
+  /* 底部一道来回扫的细线：只表示「还在忙」，不表示具体百分比（首屏没有可信的进度） */
+  .bv-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 2px; overflow: hidden;
+    background: color-mix(in srgb, var(--red, #ff3b4e) 16%, transparent);
+  }
+  .bv-bar::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 34%;
+    background: var(--red, #ff3b4e);
+    animation: bvSlide 1.6s ease-in-out infinite;
+  }
+  @keyframes bvSlide { 0% { transform: translateX(-120%); } 100% { transform: translateX(320%); } }
+
+  @media (prefers-reduced-motion: reduce) { #boot-veil * { animation: none !important; } }
 </style>
 </head>
 <body>
+<div id="boot-veil" aria-hidden="true">
+  <div class="bv-pulse">
+    <span class="bv-ring"></span><span class="bv-ring"></span>
+    <span class="bv-dot"></span>
+  </div>
+  <div class="bv-bars"><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="bv-text">正在接通频道</div>
+  <div class="bv-brand">24H RADIO</div>
+  <div class="bv-bar"></div>
+</div>
+
 <div class="glow"></div>
 
 <header class="topbar">
