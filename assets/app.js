@@ -351,6 +351,17 @@
     offline: false,                         // 本机服务不可用
     retried: {},                            // 已重试过的单元，避免出错循环
     dashRetried: {},                        // 已「干净重建过一次」的 DASH key（见 fail）
+    cycleStale: false,      // 有新清单还没套用到时间轴（softApply 置位，tick 消费）
+    /* 正在播的那一支豁免「跳过空白」规则：切换开关时设上，直到真的换到别的一支
+       才失效（applyPlayer 跨支时清）。
+       做成**持久状态**而不是「重建时传一次」是有原因的：点完开关之后还会有别的
+       重建路径 —— 后台抓到新清单（tick 消费 cycleStale）、playProgram 的按需重建 ——
+       走的都是同一个 buildCycle。豁免若只对那一次重建有效，后续重建会把当前支
+       重新切成片段，画面立刻被拽到别的片段去（用户看到的「连跳几次」就是这个）。 */
+    exemptCid: null,
+    aimVer: 0,              // 重瞄序号：加载回调据此判断手里的 anchor 是否已过时
+    aimCid: null,           // 最近一次重瞄的是哪一支
+    aimPos: null,           // 最近一次重瞄的目标频道坐标
     // 标注：编辑中的分段副本与「改过没」标记（保存成功才写回 window.SEGMENTS）。
     // pendingStart 是「按了 M 记下起点、还没记终点」的那一次。
     segDraft: {}, segDirty: {}, pendingStart: null
@@ -438,8 +449,13 @@
   // 开启「跳过空白」且该分P 有标注时，只播标注片段；否则整段照常播
   // segments.js 里写的是 start/end，这里换算成 start/duration 并丢弃非法项
   // exemptCid：这一支不参与本次规则（切换开关时它就是正在播的那支，见 btnSkip）
-  function effectiveUnits(part, exemptCid) {
-    var segs = (state.skip && part.cid !== exemptCid) ? segmentsOf(part.cid) : null;
+  // 读的是 state.exemptCid 而**不是调用参数** —— 豁免要跨多次重建一直生效，
+  // 否则任何一次后台重建都会把正在播的那一支重新切碎（详见 state 里的注释）。
+  function effectiveUnits(part) {
+    if (String(part.cid) === String(state.exemptCid)) {
+      return [{ start: 0, duration: part.duration, label: '' }];
+    }
+    var segs = state.skip ? segmentsOf(part.cid) : null;
     if (!segs) return [{ start: 0, duration: part.duration, label: '' }];
     var units = segs
       .filter(function (s) { return s && typeof s.start === 'number' && s.end > s.start; })
@@ -472,7 +488,7 @@
     return h;
   }
 
-  function buildCycle(programs, exemptCid) {
+  function buildCycle(programs) {
     var arr = programs.slice().map(function (p) {
       return { p: p, k: cycleKey(p.bvid, CFG.seed) };
     }).sort(function (a, b) {
@@ -494,7 +510,7 @@
     var acc = 0;
     arr.forEach(function (p) {
       p.parts.forEach(function (part) {
-        effectiveUnits(part, exemptCid).forEach(function (u) {
+        effectiveUnits(part).forEach(function (u) {
           segments.push({
             bvid: p.bvid,
             page: part.page,
@@ -536,11 +552,11 @@
     return segs.length - 1;
   }
 
-  function rebuildCycle(soft, exemptCid) {
+  function rebuildCycle(soft) {
     var pool = state.all.filter(function (p) {
       return !Object.keys(state.cats).length || state.cats[p.category];
     });
-    state.cycle = buildCycle(pool, exemptCid);
+    state.cycle = buildCycle(pool);
     // soft：只是后台抓到新清单后换一份，播放中的那一段不能被打断
     // （drift / segIndex / playingKey 保持原样，tick 会自己判断要不要换段）
     if (soft) return;
@@ -562,22 +578,60 @@
     var segs = state.cycle.segments;
     var total = state.cycle.total;
     var wrap = function (v) { return ((v % total) + total) % total; };
-    for (var i = 0; i < segs.length; i++) {
-      var s = segs[i];
-      if (s.cid !== cid || at < s.t0 || at >= s.t0 + s.duration) continue;
-      var pos = s.start + (at - s.t0);
-      // 已经在播：只挪 cycleBase（cyclePos 用它算位置），currentTime 原封不动。
-      // 还没就绪：改 wantPos，让它成为加载完成后的落点。
-      if (state.mediaBase !== null && el.player && el.player.readyState > 0) {
-        state.cycleBase = wrap(pos - (el.player.currentTime - state.mediaBase));
-      } else {
-        state.wantPos = wrap(pos);
-        state.cycleBase = wrap(pos);
-      }
-      state.segIndex = i;      // 不让 tick 把它当成「换段了」而去重载
-      return true;
+    var mine = [], k;
+    for (k = 0; k < segs.length; k++) {
+      if (String(segs[k].cid) === String(cid)) mine.push(k);
     }
-    return false;
+    if (!mine.length) return false;
+    var endMost = 0;
+    mine.forEach(function (ix) {
+      endMost = Math.max(endMost, segs[ix].t0 + segs[ix].duration);
+    });
+    /* 这一支已经（快要）播到头了 —— 别再把它钉回来。
+       媒体播完 currentTime 就停在 duration 上，cyclePos 随之不再前进；如果这时还把
+       位置瞄回「段尾前一点点」，那就是「永远换不到下一支」的死循环。
+       差不到一秒就要过去的内容也犯不着保，这里一律认定该换了。 */
+    if (at >= endMost - 1) return false;
+
+    var pick = -1, t = at, s;
+    for (k = 0; k < mine.length; k++) {
+      s = segs[mine[k]];
+      if (at >= s.t0 && at < s.t0 + s.duration) { pick = mine[k]; t = at; break; }
+    }
+    if (pick < 0) {
+      /* 落在两个片段之间的空隙（清单刷新、段表重算都会这样）：
+         贴到最近的那一段，至少画面还是这一支 —— 比跳到别的节目好得多。 */
+      for (k = 0; k < mine.length; k++) {
+        s = segs[mine[k]];
+        if (at < s.t0) { pick = mine[k]; t = s.t0; break; }
+        pick = mine[k];
+        t = Math.max(s.t0, s.t0 + s.duration - 0.25);
+      }
+    }
+    var pos = segs[pick].start + (t - segs[pick].t0);
+    // 已经在播：只挪 cycleBase（cyclePos 用它算位置），currentTime 原封不动。
+    // 还没就绪：改 wantPos，让它成为加载完成后的落点。
+    if (state.mediaBase !== null && el.player && el.player.readyState > 0) {
+      state.cycleBase = wrap(pos - (el.player.currentTime - state.mediaBase));
+    } else {
+      state.wantPos = wrap(pos);
+      state.cycleBase = wrap(pos);
+    }
+    state.segIndex = pick;   // 不让 tick 把它当成「换段了」而去重载
+    // 记下这次重瞄：正在天上飞的加载回调要用它纠正自己手里的旧坐标（见 rebaseByAim）
+    state.aimVer++;
+    state.aimCid = segs[pick].cid;
+    state.aimPos = wrap(pos);
+    return true;
+  }
+
+  /* 取流请求在天上飞的时候（几百毫秒到几秒），用户可以随时点「跳过空白」把频道
+     重瞄到别处。回调落地时若还按请求发出那一刻算的 anchor 去写 cycleBase，
+     就等于把画面又拽回旧坐标 —— 实测表现为「点一下跳两三次」。
+     所以调用者在发起加载时快照一下 aimVer，回调里发现变了就改用最新重瞄结果。 */
+  function rebaseByAim(seg, base, aimVer0) {
+    return (state.aimVer !== aimVer0 && state.aimPos !== null
+            && String(state.aimCid) === String(seg.cid)) ? state.aimPos : base;
   }
 
   /* ---------------------------------------------------------- 播放器 */
@@ -600,6 +654,7 @@
   function loadMediaMp4(seg, seekTo, anchor) {
     if (state.offline) return;
     var key = seg.bvid + '#' + seg.page + '#' + state.qn;
+    var aim0 = state.aimVer;                // 见 rebaseByAim：回调要认得出期间的重新瞄准
     state.loadingKey = key;
     state.loading = true;
     state.loadingAt = Date.now();
@@ -621,6 +676,7 @@
         var base = (anchor === undefined || anchor === null)
           ? (((now() - CFG.epoch) + state.drift) % total + total) % total
           : ((anchor % total) + total) % total;
+        base = rebaseByAim(seg, base, aim0);
         state.cycleBase = base;
         state.mediaBase = seekTo;
         state.wantPos = base;
@@ -701,6 +757,7 @@
     state.loading = true;
     state.loadingAt = Date.now();
     delete state.dashRetried[key];          // 新一轮加载：重试额度重置（按 key 记会永久生效）
+    var aim0 = state.aimVer;                // 见 rebaseByAim：回调要认得出期间的重新瞄准
 
     var total = state.cycle.total;
     var base = (anchor === undefined || anchor === null)
@@ -724,9 +781,9 @@
             + '&cid=' + seg.cid + '&qn=' + state.qn;
 
     function ok() {
-      state.cycleBase = base;
+      state.cycleBase = rebaseByAim(seg, base, aim0);
       state.mediaBase = seekTo;
-      state.wantPos = base;
+      state.wantPos = state.cycleBase;
       el.player.muted = state.muted;
       try { el.player.currentTime = seekTo; } catch (e) { /* 忽略 */ }
       el.player.play().catch(function () { /* 浏览器可能要求手势 */ });
@@ -827,6 +884,10 @@
         state.cycleBase = pos;
       }
     } else if (force || key !== state.playingKey) {
+      /* 换了分P（不是同一支内的片段切换）—— 那支「豁免」也随之到期：
+         下一支开始按新的开关规则播。段表里其他支本来就是按规则铺好的，
+         所以这里不必重建。 */
+      if (String(seg.cid) !== String(state.exemptCid)) state.exemptCid = null;
       state.playingKey = key;
       loadMedia(seg, seg.t0 + offset);
     }
@@ -3689,7 +3750,13 @@
       state.skip = !state.skip;
       store.set('xl_skip', state.skip);
       syncSkip();
-      rebuildCycle(true, keepCid);
+      /* 豁免是**持续到换支为止**的状态，不是只给这一次重建的参数：
+         点完之后还会有别的路径重建段表（后台抓到新清单 → tick 消费 cycleStale、
+         playProgram 的按需重建），它们读同一个 state.exemptCid，于是当前支
+         在任何一次重建里都保持整段 —— 画面不会被反复拉扯。
+         换到下一支时 applyPlayer 会把它清掉，新规则从下一支开始生效。 */
+      state.exemptCid = keepCid;
+      rebuildCycle(true);
       if (cur) aimCycleAt(keepCid, keepAt);
       if (state.view === 'schedule') renderSchedule();
     });
@@ -3809,11 +3876,27 @@
            drift 才设好就被清零，画面跳到别的一期去（实测：点 A 停在 B）。
            soft 只换段表、不动 drift，位置是连续的。
 
-           重建后要**按新段表重算并继续走换段流程**，不能只把 segIndex 挪过去
+           但「位置连续」不等于「还是那一支」：频道坐标是绝对秒数，别的支多出
+           或少掉几个片段，同一个坐标就落到别的节目上了。所以重建后要**按正在
+           播的那一支重新瞄准**（跳过空白 exempt 的那一支已经在段表里留好了整段，
+           一定能瞄回去；没豁免时 aimCycleAt 会把越界的坐标夹回邻近片段）。
+           少了这一步，用户看到的就是「清单刷新一下，画面莫名其妙跳一次」。
+
+           重建后还要**按新段表重算并继续走换段流程**，不能只把 segIndex 挪过去
            就 return —— 那等于「标题已经写着新段、画面还是旧的那一支」，
            用户看到的就是莫名其妙的错位。 */
         state.cycleStale = false;
+        var old = state.cycle.segments[state.segIndex];
+        var keepAt = old ? old.t0 + (cyclePos() - old.start) : null;
+        var next = state.cycle.segments[i];   // 旧表里这一刻本来要去的下一支
         rebuildCycle(true);
+        if (old && aimCycleAt(old.cid, keepAt)) {
+          /* 正常：位置还在这一支里面，瞄回去，画面纹丝不动 */
+        } else if (next) {
+          /* 这一支刚好播到头（再瞄回去就走不掉了）。那就去找**本来要去的那一支**
+             的开头 —— 而不是让绝对坐标在新段表里乱落到一个不相干的节目上。 */
+          aimCycleAt(next.cid, next.t0);
+        }
         i = findSeg(cyclePos());
       }
       state.segIndex = i;
@@ -3869,6 +3952,9 @@
     state.all = data.programs || [];
     state.meta = data.meta || {};
     state.muted = state.mutedDefault;
+    // 调试出口：排节目的坑（换段漂移、豁免失效……）全在这些状态里，光看界面看不出来。
+    // 只读地看一眼（不要从外部改），省得每次都靠猜。
+    window.__STATE = state;
 
     updateMetaText();
 
