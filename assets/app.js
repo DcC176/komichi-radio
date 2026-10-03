@@ -437,8 +437,9 @@
 
   // 开启「跳过空白」且该分P 有标注时，只播标注片段；否则整段照常播
   // segments.js 里写的是 start/end，这里换算成 start/duration 并丢弃非法项
-  function effectiveUnits(part) {
-    var segs = state.skip ? segmentsOf(part.cid) : null;
+  // exemptCid：这一支不参与本次规则（切换开关时它就是正在播的那支，见 btnSkip）
+  function effectiveUnits(part, exemptCid) {
+    var segs = (state.skip && part.cid !== exemptCid) ? segmentsOf(part.cid) : null;
     if (!segs) return [{ start: 0, duration: part.duration, label: '' }];
     var units = segs
       .filter(function (s) { return s && typeof s.start === 'number' && s.end > s.start; })
@@ -471,7 +472,7 @@
     return h;
   }
 
-  function buildCycle(programs) {
+  function buildCycle(programs, exemptCid) {
     var arr = programs.slice().map(function (p) {
       return { p: p, k: cycleKey(p.bvid, CFG.seed) };
     }).sort(function (a, b) {
@@ -493,7 +494,7 @@
     var acc = 0;
     arr.forEach(function (p) {
       p.parts.forEach(function (part) {
-        effectiveUnits(part).forEach(function (u) {
+        effectiveUnits(part, exemptCid).forEach(function (u) {
           segments.push({
             bvid: p.bvid,
             page: part.page,
@@ -535,11 +536,11 @@
     return segs.length - 1;
   }
 
-  function rebuildCycle(soft) {
+  function rebuildCycle(soft, exemptCid) {
     var pool = state.all.filter(function (p) {
       return !Object.keys(state.cats).length || state.cats[p.category];
     });
-    state.cycle = buildCycle(pool);
+    state.cycle = buildCycle(pool, exemptCid);
     // soft：只是后台抓到新清单后换一份，播放中的那一段不能被打断
     // （drift / segIndex / playingKey 保持原样，tick 会自己判断要不要换段）
     if (soft) return;
@@ -551,6 +552,32 @@
     if (state.view === 'broadcast') return;
     if (state.cycle.total > 0) applyPlayer(true);
     else renderIdle();
+  }
+
+  /* 把频道位置重新瞄到「cid 这支的第 at 秒」，**一个字节都不动播放器**。
+     段表长度变了（跳过空白会把空档从时间轴上剪掉），同一个坐标在新表里会落到
+     别的节目上去 —— 切换开关后不重瞄，画面就会被拽到另一支。
+     返回是否命中：找不到对应单元时调用方维持原状即可。 */
+  function aimCycleAt(cid, at) {
+    var segs = state.cycle.segments;
+    var total = state.cycle.total;
+    var wrap = function (v) { return ((v % total) + total) % total; };
+    for (var i = 0; i < segs.length; i++) {
+      var s = segs[i];
+      if (s.cid !== cid || at < s.t0 || at >= s.t0 + s.duration) continue;
+      var pos = s.start + (at - s.t0);
+      // 已经在播：只挪 cycleBase（cyclePos 用它算位置），currentTime 原封不动。
+      // 还没就绪：改 wantPos，让它成为加载完成后的落点。
+      if (state.mediaBase !== null && el.player && el.player.readyState > 0) {
+        state.cycleBase = wrap(pos - (el.player.currentTime - state.mediaBase));
+      } else {
+        state.wantPos = wrap(pos);
+        state.cycleBase = wrap(pos);
+      }
+      state.segIndex = i;      // 不让 tick 把它当成「换段了」而去重载
+      return true;
+    }
+    return false;
   }
 
   /* ---------------------------------------------------------- 播放器 */
@@ -3650,10 +3677,20 @@
     });
 
     el.btnSkip.addEventListener('click', function () {
+      /* 这是功能开关，不是换台按钮：正在播的那一支连同它的进度都不能动。
+         做法两步 —— ①重建段表时把这一支**豁免**（它仍按整段铺排，于是能在
+         新表里找回放得出来的那一秒）；②再把频道锚点重瞄到同一支的同一秒。
+         新规则从下一支开始生效，画面从头到尾不重载、不 seek。 */
+      var cur = state.cycle.segments ? state.cycle.segments[state.segIndex] : null;
+      // 用 channel 里算出来的当前位置（播放器在播时它就是 currentTime 折算来的），
+      // 于是「在播 / 加载中 / 还没播」三种情形都能保住同一支的同一秒。
+      var keepCid = cur ? cur.cid : null;
+      var keepAt = cur ? cur.t0 + (cyclePos() - cur.start) : null;
       state.skip = !state.skip;
       store.set('xl_skip', state.skip);
       syncSkip();
-      rebuildCycle();
+      rebuildCycle(true, keepCid);
+      if (cur) aimCycleAt(keepCid, keepAt);
       if (state.view === 'schedule') renderSchedule();
     });
 
