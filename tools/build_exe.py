@@ -30,7 +30,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "发布")
 BUILD = os.path.join(ROOT, "build")
 
-APP_VERSION = "1.5.8"                     # 程序版本号，每版递增
+APP_VERSION = "1.5.9"                     # 程序版本号，每版递增
 PYI_NAME = "KomichiRadio"                 # PyInstaller 内部用名（ASCII）
 # 给用户的文件名带版本号 —— 发布目录里会同时存在多个版本，一眼能看出哪个是新的。
 # 内部标识（APP_TAG、释放目录、实例探测）都走 HTTP 或固定字符串，**不依赖这个文件名**，
@@ -206,7 +206,12 @@ def build_exe():
             break
         except PermissionError:
             if i == 9:
-                raise
+                # 最常见的原因不是 Defender，而是**改名目标还被占着**：
+                # 预览器 / 资源管理器打开过它，或者上一个同名产物正在被另一个进程读。
+                # 本机又删不掉它，唯一干净的出路是换版本号重打，所以这里说清楚。
+                sys.exit("改名为「%s」失败（PermissionError）：目标多半被预览器/资源管理器占着，"
+                         "或该版本号已经打出过一份。\n请先关闭占用它的窗口，"
+                         "或把 APP_VERSION 递增一档后重新打包。" % FINAL_NAME)
             time.sleep(1)
     return dst
 
