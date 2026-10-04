@@ -3981,7 +3981,15 @@
     if (store.get('xl_lang') === 'zh-Hant') setLang('zh-Hant', true);
     checkServer().then(function () {
       if (state.offline) return;        // 没有服务就不去取流，避免一堆无谓的失败请求
-      rebuildCycle();
+      /* 用户在 ping 回来之前就已经点了某一期时，这里**不能**非 soft 重建：
+         非 soft 会 `drift = 0`、清空 playingKey 并 `applyPlayer(true)`，
+         画面立刻从用户点的那一期跳到「当前时刻对应的一期」，之后还会顺着
+         新坐标继续漂移（实测一次点击连跳三次）。用户看到的就是
+         「点了 A，播的是 B」「点了没反应」。
+         ping 排在首屏那一堆资源请求的队尾，这个窗口比想象中大，
+         足够点一次。交给 tick 走既有的「soft 重建 + 重瞄当前支」流程。 */
+      if (state.playingKey) state.cycleStale = true;
+      else rebuildCycle();
       refreshStatus();
       setInterval(tick, CFG.tickMs);
 
