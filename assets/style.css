@@ -47,6 +47,11 @@
   --red: #ff3b4e;
   --red-soft: rgba(255, 59, 78, .14);
   --radius: 14px;
+  /* 滚动条：全站共用一套规格。系统默认滚动条在深色页面上是一条亮灰的粗条，
+     长列表那一栏（本场分段 / 节目单 / 弹幕）尤其扎眼。 */
+  --sb-w: 10px;                                 /* 槽位总宽 */
+  --sb-thumb: rgba(255, 255, 255, .15);         /* 滑块（静止） */
+  --sb-thumb-hover: rgba(255, 255, 255, .3);    /* 滑块（悬停） */
   /* 顶栏实际高度。窄屏会变成两行（52 + 标签条），所以要用变量而不是写死 52px ——
      直播间那栏按「整屏不滚动」算高度，用错值会多出几十像素、戳到右下角浮标底下。
      还有别的地方消费这个值时，改这一处即可。 */
@@ -97,6 +102,40 @@ html {
      不固定槽位的话滚动条一出现/消失，正文宽度就差 15px ——
      实测每次在主站和微博之间切，整个版面会横向抖 7px。 */
   scrollbar-gutter: stable;
+}
+
+/* ---------------------------------------------------------------- 滚动条
+
+   全站统一：透明槽位 + 细滑块，静止时几乎不抢视线，悬停/拖动才亮起来。
+   槽位留 10px 是为了好抓，滑块再用 2px 透明边框收窄到 6px（background-clip:
+   padding-box），于是「抓得住、看着细」。拖动中用主题色 --red —— 切板块时跟着
+   一起变，和页面其它强调色是同一套语言。
+
+   注意 hover / active **只能改 background-color，不能用 background 简写** ——
+   简写会把 background-clip 重置回 border-box，滑块宽度会当场跳一下。 */
+::-webkit-scrollbar { width: var(--sb-w); height: var(--sb-w); }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background-color: var(--sb-thumb);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover { background-color: var(--sb-thumb-hover); }
+::-webkit-scrollbar-thumb:active {
+  background-color: color-mix(in srgb, var(--red) 62%, transparent);
+}
+/* 两端的小箭头按钮是系统样式里最旧的那部分，直接去掉 */
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* Firefox 没有 ::-webkit-scrollbar，只能用它自己的两个属性。
+   必须用 @supports 隔开：Chromium 121+ 只要看到 scrollbar-color 就会**整条忽略**
+   ::-webkit-scrollbar 那套，悬停/拖动变色会全部失效。
+   反向地：任何自己写了 scrollbar-width / scrollbar-color 的容器都会绕开上面的规则、
+   退回系统样式。所以除了刻意隐藏滚动条的 .tb-tabs，别处不要再写这两个属性。 */
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: var(--sb-thumb) transparent; }
 }
 
 html, body {
@@ -1472,9 +1511,6 @@ body.theater .chapters-panel { display: none; }
 .status-mini:hover { color: var(--text); border-color: rgba(255, 255, 255, .3); }
 
 .status-panel-body { padding: 12px 14px; max-height: 46vh; overflow-y: auto; overflow-x: hidden; }
-.status-panel-body::-webkit-scrollbar { width: 6px; }
-.status-panel-body::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, .16); border-radius: 3px; }
-.status-panel-body::-webkit-scrollbar-track { background: transparent; }
 
 .status-loading { color: var(--muted); font-size: 13px; padding: 8px 0; }
 
@@ -1682,7 +1718,8 @@ body.view-broadcast #view-broadcast {
      改成这里自己滚，保证「发弹幕」和常用语在矮窗口里也够得着。 */
   overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: thin;
+  /* 不写 scrollbar-width：Chromium 见到它就会忽略 ::-webkit-scrollbar，
+     滚动条会退回系统样式（宽度和配色都跟不上主题）。统一见文件顶部「滚动条」块。 */
   /* 作为 container query 的容器：下面要按「这一栏自己的宽度」决定内部怎么排，
      而不是按视口宽度 —— 右栏宽是 13% 的函数，跟视口不是线性对应关系。 */
   container-type: inline-size;
@@ -2137,7 +2174,6 @@ body.view-broadcast #btn-quality { display: none; }
   .quick-chips {
     flex-wrap: nowrap;
     overflow-x: auto;
-    scrollbar-width: thin;
   }
   /* 不换行的 flex 容器会把 chip 压扁（chip 默认 flex-shrink:1）→ 保持自然宽度 */
   .quick-chips > * { flex: 0 0 auto; }
@@ -2154,7 +2190,7 @@ body.view-broadcast #btn-quality { display: none; }
      在这个宽度下会折成 8 行、占 154px，比整个弹幕列表还高。窄栏下缩小字号，
      并限高 5 行自己滚 —— 不截断（截断会让操作步骤读不到），滚动可达全文。 */
   .live-note { font-size: 11.5px; line-height: 1.55; }
-  #live-cred-state { max-height: 90px; overflow-y: auto; scrollbar-width: thin; }
+  #live-cred-state { max-height: 90px; overflow-y: auto; }
 }
 
 
