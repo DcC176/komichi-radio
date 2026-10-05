@@ -82,7 +82,7 @@
      （微博就漏过一次 —— 切到别的板块，微博页还是四时小路的内容，界面看起来完全正常）。
      当前对应关系：
        programs(清单) / segments/*(分段) / live/*(直播) / status-board(小路状态)
-       / weibo*(微博) / series(回放来源) —— 后两个是补上的。
+       / weibo*(微博) / dynamic(动态) / series(回放来源) —— 后几个是补上的。
      不带 station 的：/api/status(B站登录态)、/api/stations(主播注册表)、
        /api/img(图片代理)、/api/protocol、/api/ping —— 都是全局的。 */
   var STATION_RE = new RegExp('^/api/(' + [
@@ -92,6 +92,7 @@
     'live/',
     'status-board',
     'weibo',
+    'dynamic',
     'series'
   ].join('|') + ')');
   /* ---------- 主题色：随「板块」（当前在看的主播）切换 ----------
@@ -306,7 +307,7 @@
     };
   })();
 
-  var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'categories', 'weibo', 'about', 'settings'];
+  var VIEWS = ['live', 'multi', 'broadcast', 'schedule', 'categories', 'dynamic', 'weibo', 'about', 'settings'];
   var KEY_MUTED = 'xl_muted';
 
   var store = {
@@ -2494,7 +2495,8 @@
     // 离开监控室必须销毁：这几路是持续拉流的直播，不销毁就会在后台一直跑，
     // 反复进出还会累积孤儿连接（重连定时器也一并清掉）。
     if (prev === 'multi' && name !== 'multi') multiTeardown();
-    // 微博：切进来时才取（微博接口慢又是外部服务，没必要在首页就拉）
+    // 动态 / 微博：切进来时才取（都是外部服务，没必要在首页就拉）
+    if (name === 'dynamic') { bindDynamic(); renderDynamic(); }
     if (name === 'weibo') { bindWeibo(); renderWeibo(); }
 
     // 真的换了页面就从顶部看起 —— 否则在列表里滚了几屏之后切到设置页，
@@ -4546,6 +4548,7 @@
         // #/weibo），switchView 那次渲染发生在名单到达之前 —— 那时 findStation()
         // 查不到人，页面会写成「这位板块还没有配置微博」，而且不会自己纠正。
         if (state.view === 'weibo') renderWeibo();
+        if (state.view === 'dynamic') renderDynamic();
         return STATIONS;
       })
       .catch(function () { STATIONS = []; return STATIONS; });
@@ -4892,6 +4895,148 @@
     });
   }
 
+
+  /* ---------------------------------------------------------- 主播动态（B 站空间动态） */
+
+  /* 与微博页同构：跟着当前板块走，切板块就换人。区别是**不用登录** ——
+     buvid3 由后端自己领，SESSDATA 用现成的 tools/sessdata.txt。
+     所以这里没有微博页那套「开浏览器窗口登录」的 UI，失败时给一句能照做的提示就够。 */
+  var dynState = { data: null, loading: false, bound: false };
+
+  var DYN_KIND = {
+    DYNAMIC_TYPE_DRAW: '图文',
+    DYNAMIC_TYPE_WORD: '文字',
+    DYNAMIC_TYPE_FORWARD: '转发',
+    DYNAMIC_TYPE_AV: '投稿',
+    DYNAMIC_TYPE_LIVE_RCMD: '直播'
+  };
+
+  function dynSetTxt(id, txt) {
+    var e = document.getElementById(id);
+    if (e) e.textContent = txt;
+  }
+
+  function dynTip(html) {
+    var n = document.getElementById('dyn-note');
+    if (!n) return;
+    if (!html) { n.hidden = true; return; }
+    n.innerHTML = html;
+    n.hidden = false;
+  }
+
+  /* 图片走本机代理。B 站给的是 http://，而 /api/img 只收 https —— 这里升一下协议。
+     域名（i*.hdslb.com）本来就在服务端白名单里，不用改后端。 */
+  function dynImg(u) {
+    return '/api/img?u=' + b64url(String(u).replace(/^http:/, 'https:'));
+  }
+
+  function renderDynamic() {
+    var list = document.getElementById('dyn-list');
+    if (!list) return;
+    var st = findStation(ST) || {};
+    var name = st.short || st.name || '';
+    dynSetTxt('dyn-title', (name || '') + (name ? '的' : '') + '动态');
+    if (!st.mid) {
+      dynSetTxt('dyn-sub', '这位板块还没有 B 站 UID。');
+      dynTip('在 <code>data/stations.json</code> 里给它加一个 '
+        + '<code>"mid": "空间号"</code> 就会出现在这里。');
+      list.innerHTML = '';
+      return;
+    }
+    dynSetTxt('dyn-sub', '来自 B 站空间的最新动态（space.bilibili.com/'
+      + st.mid + '/dynamic）。');
+    loadDynamic();
+  }
+
+  function loadDynamic(force) {
+    var list = document.getElementById('dyn-list');
+    if (!list || dynState.loading) return;
+    dynState.loading = true;
+    if (!dynState.data) {
+      list.innerHTML = '<div class="wb-skel"></div><div class="wb-skel"></div>';
+    }
+    fetch('/api/dynamic' + (force ? '?refresh=1' : ''))
+      .then(function (r) { return r.json(); })
+      .then(function (d) { dynState.data = d; dynState.loading = false; paintDynamic(d); })
+      .catch(function (e) {
+        dynState.loading = false;
+        list.innerHTML = '';
+        dynTip('取动态失败：<b>' + esc(e && e.message ? e.message : String(e)) + '</b>');
+      });
+  }
+
+  function paintDynamic(d) {
+    var list = document.getElementById('dyn-list');
+    var foot = document.getElementById('dyn-foot');
+    var items = d.items || [];
+    if (!items.length) {
+      list.innerHTML = '';
+      if (d.error) {
+        /* 后端把「被风控」与「B 站返回非 0」都写进 error —— 这里补上用户能照做的那一步，
+           否则界面只剩一句「code=-352」，看不懂也没法行动。 */
+        dynTip('没取到动态：<b>' + esc(d.error) + '</b>'
+          + (d.logged ? '' : '<br>B 站要带登录态才给动态：把浏览器里的 <code>SESSDATA</code> '
+              + '写进 <code>tools/sessdata.txt</code> 就行。'));
+      } else {
+        dynTip('这位还没有公开动态。');
+      }
+      foot.hidden = true;
+      return;
+    }
+    dynTip('');
+    list.innerHTML = items.map(dynItem).join('');
+    foot.hidden = false;
+    foot.textContent = '共 ' + items.length + ' 条 · 点卡片可在 B 站查看原动态';
+  }
+
+  function dynItem(x) {
+    var pics = x.pics || [];
+    var picsHtml = pics.length
+      ? '<div class="wb-pics' + (pics.length === 1 ? ' one' : '') + '">'
+        + pics.slice(0, 9).map(function (p) {
+            return '<img src="' + esc(dynImg(p.u)) + '" alt="" loading="lazy" '
+              + 'referrerpolicy="no-referrer">';
+          }).join('') + '</div>'
+      : '';
+    var orig = x.orig
+      ? '<div class="wb-retweet"><b>' + esc(x.orig.name || '原动态') + '</b>'
+        + (x.orig.text ? esc(x.orig.text) : '') + '</div>'
+      : '';
+    var kind = DYN_KIND[x.type] || '';
+    var body = (x.text ? '<div class="wb-text">' + esc(x.text) + '</div>' : '')
+      + picsHtml + orig;
+    if (!body) {
+      // 有一条图文动态的图被 B 站隐去了（接口回空数组）—— 不补一句，卡片就是空的
+      body = '<div class="wb-text dyn-empty">这条动态没有可显示的内容，'
+        + '点「去 B 站看」打开原动态。</div>';
+    }
+    return '<div class="wb-item" data-url="' + esc(x.url) + '">'
+      + '<div class="wb-item-h"><span class="wb-time">' + esc(x.time) + '</span>'
+      + (kind ? '<span>' + esc(kind) + '</span>' : '') + '</div>'
+      + body
+      + '<div class="wb-acts">'
+      + '<span>转发 ' + fmtNum(x.forward) + '</span>'
+      + '<span>评论 ' + fmtNum(x.comment) + '</span>'
+      + '<span>赞 ' + fmtNum(x.like) + '</span>'
+      + (x.url ? '<a class="wb-open" target="_blank" rel="noopener" href="' + esc(x.url)
+                 + '">去 B 站看 →</a>' : '')
+      + '</div></div>';
+  }
+
+  function bindDynamic() {
+    if (dynState.bound) return;
+    dynState.bound = true;
+    var list = document.getElementById('dyn-list');
+    if (!list) return;
+    // 点卡片跳原动态；点卡片里的链接让它自己走（否则会连开两个标签页）
+    list.addEventListener('click', function (ev) {
+      if (ev.target.closest('a')) return;
+      var box = ev.target.closest('.wb-item');
+      if (box && box.getAttribute('data-url')) {
+        window.open(box.getAttribute('data-url'), '_blank', 'noopener');
+      }
+    });
+  }
 
   /* ---------------------------------------------------------- 微博 */
 

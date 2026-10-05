@@ -139,6 +139,7 @@ window.__BOOT_T0 = Date.now();
     <a class="tab" data-view="schedule" href="#/schedule">节目单</a>
     <a class="tab" data-view="categories" href="#/categories">分类</a>
     <a class="tab" data-view="multi" href="#/multi">监控室</a>
+    <a class="tab" data-view="dynamic" href="#/dynamic">动态</a>
     <a class="tab" data-view="weibo" href="#/weibo">微博</a>
     <a class="tab" data-view="about" href="#/about">关于</a>
     <a class="tab" data-view="settings" href="#/settings">设置</a>
@@ -354,6 +355,18 @@ window.__BOOT_T0 = Date.now();
         </thead>
         <tbody id="sch-rows"></tbody>
       </table>
+    </section>
+
+    <section class="view" id="view-dynamic">
+      <div class="eyebrow">—— 动态</div>
+      <h1 class="title sm" id="dyn-title">动态</h1>
+      <p class="sub" id="dyn-sub">这里显示当前板块主播在 B 站发布的最新动态。</p>
+
+      <div class="wb-note" id="dyn-note" hidden></div>
+
+      <div class="wb-list" id="dyn-list"></div>
+
+      <div class="wb-foot" id="dyn-foot" hidden></div>
     </section>
 
     <section class="view" id="view-weibo">

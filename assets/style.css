@@ -2572,3 +2572,6 @@ body.view-broadcast #btn-quality { display: none; }
 .wb-foot[hidden] { display: none; }
 
 .wb-skel { height: 74px; border-radius: 12px; background: var(--panel); }
+
+/* 动态页复用整套 .wb-* 卡片样式，只多这一条：图被 B 站隐去时的兜底文案 */
+.dyn-empty { color: var(--muted-2); font-size: 12.5px; }

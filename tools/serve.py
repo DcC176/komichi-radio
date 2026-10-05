@@ -3357,6 +3357,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(code, obj)
         if parsed.path == "/api/stations":
             return self._json(*api_stations())
+        if parsed.path == "/api/dynamic":
+            return self._json(*api_dynamic(q))
         if parsed.path == "/api/weibo":
             return self._json(*api_weibo(q))
         if parsed.path == "/api/weibo/login/poll":
@@ -3545,6 +3547,167 @@ def bind_server(bind, port, tries=20):
             continue
     return None, None
 
+
+
+# ---------------------------------------------------------------- 主播动态（B 站空间动态）
+#
+# 与微博页同构：按当前板块取该主播的动态。但**不需要登录窗口** ——
+# buvid3 由本服务自己领（finger/spi），领一次缓存 12 小时，对用户是透明的。
+#
+# 实测（2026-10-05，UID 1512246445）：
+#   · 不带任何 cookie     → HTTP 412（风控）
+#   · 只带 buvid3         → HTTP 200 但 code=-352（仍是风控）
+#   · SESSDATA + buvid3   → HTTP 200 code=0，13 条
+# 所以两个都得带：SESSDATA 用现成的 tools/sessdata.txt，缺失时如实告诉用户。
+# 图片是 i*.hdslb.com（已在 MEDIA_HOSTS 白名单内），但接口给的是 http://，
+# 而 /api/img 只收 https —— 由前端把协议升一下，后端不放宽校验。
+
+BILI_DYN_API = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
+BILI_FINGER_API = "https://api.bilibili.com/x/frontend/finger/spi"
+DYN_TTL_OK = 300            # 成功结果缓存 5 分钟（动态不常变，别反复打扰 B 站）
+DYN_TTL_FAIL = 60
+_DYN_LOCK = threading.Lock()
+_DYN_CACHE = {}             # mid -> {"at": ts, "data": {...}}
+_BUVID = {"v": "", "at": 0.0}
+
+
+def bili_buvid3(force=False):
+    """领一个 buvid3（B 站要求的风控指纹 cookie），缓存 12 小时。"""
+    now = time.time()
+    with _DYN_LOCK:
+        if not force and _BUVID["v"] and now - _BUVID["at"] < 12 * 3600:
+            return _BUVID["v"]
+    v = ""
+    try:
+        d = bili_get(BILI_FINGER_API, referer="https://www.bilibili.com")
+        v = str((d.get("data") or {}).get("b_3") or "")
+    except Exception:
+        v = ""
+    if v:
+        with _DYN_LOCK:
+            _BUVID["v"] = v
+            _BUVID["at"] = now
+    return v
+
+
+def _dyn_pics(major):
+    """取图片列表 —— 图文动态把图放在 major.draw.items。"""
+    out = []
+    for it in (((major or {}).get("draw") or {}).get("items") or []):
+        u = str(it.get("src") or "")
+        if u:
+            out.append({"u": u, "w": it.get("width") or "", "h": it.get("height") or ""})
+    return out
+
+
+def _dyn_count(stat, key):
+    try:
+        return int((stat.get(key) or {}).get("count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _dyn_item(it):
+    """把一条动态压成前端要的那几个字段。
+
+    只认「图文」与「转发」两种 —— 实测里实际出现的就这两类。其余类型
+    （视频投稿、直播卡……）退化成「有文字就显示文字 + 一个去 B 站的链接」，
+    不去猜它们的结构（猜错会渲染出坏卡片）。
+    """
+    mods = it.get("modules") or {}
+    au = mods.get("module_author") or {}
+    dy = mods.get("module_dynamic") or {}
+    stat = mods.get("module_stat") or {}
+    orig = it.get("orig") or {}
+    om = orig.get("modules") or {}
+    oau = om.get("module_author") or {}
+    ody = om.get("module_dynamic") or {}
+    did = str((it.get("basic") or {}).get("comment_id_str") or it.get("id_str") or "")
+    pics = _dyn_pics(dy.get("major")) or (_dyn_pics(ody.get("major")) if orig else [])
+    text = ((dy.get("desc") or {}).get("text") or "")
+    # 直播预约这类动态既没有正文也没有图，信息全在 additional.reserve 里 ——
+    # 不取出来这条就渲染成一张空卡片（实测四时小路「7小时前」那条正是如此）。
+    add = dy.get("additional") or {}
+    res = add.get("reserve") or {}
+    if not text and add.get("type") == "ADDITIONAL_TYPE_RESERVE" and res:
+        bits = [res.get("title") or "", (res.get("desc1") or {}).get("text") or ""]
+        text = " · ".join([b for b in bits if b])
+    return {
+        "id": did,
+        "type": it.get("type") or "",
+        "ts": au.get("pub_ts") or 0,
+        "time": au.get("pub_time") or "",
+        "text": text,
+        "pics": pics,
+        "orig": ({"name": oau.get("name") or "",
+                  "text": ((ody.get("desc") or {}).get("text") or "")} if orig else None),
+        "like": _dyn_count(stat, "like"),
+        "comment": _dyn_count(stat, "comment"),
+        "forward": _dyn_count(stat, "forward"),
+        "url": ("https://t.bilibili.com/%s" % did) if did else "",
+    }
+
+
+def dynamic_fetch(mid, force=False):
+    """取一位主播的空间动态（已规整）。同一位缓存一会儿。"""
+    mid = str(mid or "").strip()
+    if not mid.isdigit():
+        return {"error": "这位还没配置 B 站 UID"}
+    now = time.time()
+    with _DYN_LOCK:
+        hit = _DYN_CACHE.get(mid) or {}
+    if not force and hit and now - hit.get("at", 0) < (
+            DYN_TTL_OK if (hit.get("data") or {}).get("items") else DYN_TTL_FAIL):
+        return hit["data"]
+
+    out = {"mid": mid, "items": [], "error": "", "logged": bool(sessdata())}
+    ck = []
+    s = sessdata()
+    if s:
+        ck.append("SESSDATA=" + s)
+    b = bili_buvid3()
+    if b:
+        ck.append("buvid3=" + b)
+    # 不要加 &features=itemOpusStyle：加了之后 B 站改回 opus 结构
+    # （图在 major.opus.pics、正文在 opus.summary.text），与这里解析的
+    # major.draw.items 对不上，实测表现为「卡片全空、一张图都没有」。
+    url = ("%s?host_mid=%s&timezone_offset=-480&platform=web"
+           % (BILI_DYN_API, urllib.parse.quote(mid)))
+    hdrs = {"User-Agent": UA, "Referer": "https://space.bilibili.com/" + mid,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "identity"}
+    if ck:
+        hdrs["Cookie"] = "; ".join(ck)
+    try:
+        with urlopen(urllib.request.Request(url, headers=hdrs), 25) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        if d.get("code") != 0:
+            out["error"] = "B 站返回 code=%s %s" % (d.get("code"), d.get("message") or "")
+        else:
+            out["items"] = [_dyn_item(x) for x in ((d.get("data") or {}).get("items") or [])]
+    except urllib.error.HTTPError as e:
+        out["error"] = (("被 B 站风控拦截（HTTP %s）" % e.code)
+                        if e.code in (403, 412) else ("HTTP %s" % e.code))
+    except Exception as e:
+        out["error"] = str(e)
+
+    with _DYN_LOCK:
+        _DYN_CACHE[mid] = {"at": now, "data": out}
+    return out
+
+
+def api_dynamic(query):
+    """GET /api/dynamic —— 当前板块主播的 B 站空间动态。"""
+    st = cur_station()
+    mid = str(st.get("mid") or "").strip()
+    if not mid:
+        return 200, {"ok": False, "station": station_head(st),
+                     "error": "这位还没有 B 站 UID（在 data/stations.json 里加 mid 字段）"}
+    data = dynamic_fetch(mid, force=("refresh" in query))
+    out = dict(data)
+    out["ok"] = bool(data.get("items"))
+    out["station"] = station_head(st)
+    return 200, out
 
 
 # ---------------------------------------------------------------- 微博
